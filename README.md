@@ -1,6 +1,6 @@
 # charger_monitor
 
-[![CI](https://github.com/OWNER/charger_monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/charger_monitor/actions/workflows/ci.yml)
+[![CI](https://github.com/elmoutaouakiltarik-web/charger_monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/elmoutaouakiltarik-web/charger_monitor/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![C++](https://img.shields.io/badge/c%2B%2B-17-blue.svg)](charger_project/CMakeLists.txt)
 [![Dependencies](https://img.shields.io/badge/dependencies-none-success.svg)](CONTRIBUTING.md)

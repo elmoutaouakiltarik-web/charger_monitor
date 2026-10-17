@@ -71,7 +71,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - Replay mode, libFuzzer harness, sanitizer builds, CMake presets.
 
-[Unreleased]: https://github.com/OWNER/charger_monitor/compare/v1.3.0...HEAD
-[1.3.0]: https://github.com/OWNER/charger_monitor/releases/tag/v1.3.0
-[1.2.0]: https://github.com/OWNER/charger_monitor/compare/v1.2.0...v1.3.0
-[1.1.0]: https://github.com/OWNER/charger_monitor/compare/v1.1.0...v1.2.0
+[Unreleased]: https://github.com/elmoutaouakiltarik-web/charger_monitor/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/elmoutaouakiltarik-web/charger_monitor/releases/tag/v1.3.0
+[1.2.0]: https://github.com/elmoutaouakiltarik-web/charger_monitor/compare/v1.2.0...v1.3.0
+[1.1.0]: https://github.com/elmoutaouakiltarik-web/charger_monitor/compare/v1.1.0...v1.2.0
