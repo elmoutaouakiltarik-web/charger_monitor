@@ -1,0 +1,8 @@
+{
+  "schema": "charger.tou.v1",
+  "windows": [
+    {"name": "OFFPEAK", "start": "00:00", "end": "08:00", "energy_eur_per_kwh": "0.15", "time_eur_per_hour": "2.00"},
+    {"name": "PEAK", "start": "08:00", "end": "20:00", "energy_eur_per_kwh": "0.40", "time_eur_per_hour": "3.00"},
+    {"name": "EVENING", "start": "20:00", "end": "00:00", "energy_eur_per_kwh": "0.25", "time_eur_per_hour": "2.50"}
+  ]
+}

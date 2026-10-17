@@ -1,0 +1,7 @@
+{
+  "schema": "charger.tou.v1",
+  "windows": [
+    {"name": "DAY", "start": "08:00", "end": "20:00", "energy_eur_per_kwh": "0.30", "time_eur_per_hour": "2.00"}
+  ],
+  "fallback": {"name": "NIGHT", "energy_eur_per_kwh": "0.10", "time_eur_per_hour": "1.00"}
+}

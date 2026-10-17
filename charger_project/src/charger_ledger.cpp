@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
+#include <map>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -22,6 +24,7 @@ namespace charger {
 namespace {
 
 constexpr const char* kTab = "\t";
+constexpr std::int64_t kMicroPerEuro = 1000000;
 
 std::uint32_t rotr(std::uint32_t x, std::uint32_t n) { return (x >> n) | (x << (32 - n)); }
 
@@ -113,6 +116,44 @@ bool parse_u64(const std::string& s, std::uint64_t& out) {
     return true;
 }
 
+// Journal payloads and dispute documents must be exact even for hand-edited
+// text fields, so strings are escaped, not trusted.
+std::string json_escape(const std::string& s) {
+    std::ostringstream o;
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"':
+                o << "\\\"";
+                break;
+            case '\\':
+                o << "\\\\";
+                break;
+            case '\b':
+                o << "\\b";
+                break;
+            case '\f':
+                o << "\\f";
+                break;
+            case '\n':
+                o << "\\n";
+                break;
+            case '\r':
+                o << "\\r";
+                break;
+            case '\t':
+                o << "\\t";
+                break;
+            default:
+                if (c < 0x20) {
+                    o << "\\u" << std::hex << std::setw(4) << std::setfill('0') << static_cast<int>(c) << std::dec;
+                } else {
+                    o << static_cast<char>(c);
+                }
+        }
+    }
+    return o.str();
+}
+
 }  // namespace
 
 std::string sha256_hex(const std::string& data) {
@@ -152,6 +193,10 @@ Ledger::Ledger(Ledger&& other) noexcept
       opens_(other.opens_),
       open_sessions_(std::move(other.open_sessions_)),
       per_asset_(std::move(other.per_asset_)),
+      sessions_(std::move(other.sessions_)),
+      context_currency_(std::move(other.context_currency_)),
+      context_timestamp_(std::move(other.context_timestamp_)),
+      context_tariff_(std::move(other.context_tariff_)),
       fsync_on_commit_(other.fsync_on_commit_) {
     other.path_.clear();
     other.lines_written_ = 0;
@@ -169,6 +214,10 @@ Ledger& Ledger::operator=(Ledger&& other) noexcept {
         opens_ = other.opens_;
         open_sessions_ = std::move(other.open_sessions_);
         per_asset_ = std::move(other.per_asset_);
+        sessions_ = std::move(other.sessions_);
+        context_currency_ = std::move(other.context_currency_);
+        context_timestamp_ = std::move(other.context_timestamp_);
+        context_tariff_ = std::move(other.context_tariff_);
         fsync_on_commit_ = other.fsync_on_commit_;
         other.path_.clear();
         other.lines_written_ = 0;
@@ -253,9 +302,13 @@ bool Ledger::append(const std::string& type, const std::string& asset, const Ses
          << rec.energy_cost_micro_eur << kTab << rec.time_cost_micro_eur << kTab << rec.flat_cost_micro_eur << kTab
          << rec.samples << kTab << rec.integration_gaps << kTab << (rec.time_upper_bound ? 1 : 0) << kTab
          << (rec.energy_lower_bound ? 1 : 0) << kTab << rec.quality << kTab << context_currency_ << kTab
-         << context_timestamp_ << kTab << json_payload;
+         << context_timestamp_ << kTab << context_tariff_ << kTab << json_payload;
     context_currency_.clear();
     context_timestamp_.clear();
+    // The tariff of record belongs to the line being closed only. Leaving it
+    // set would stamp it onto the next session_open, which has no tariff of its
+    // own, and that silently wrong line would still verify.
+    context_tariff_.clear();
 
     const std::string prev = last_hash_;
     const std::string hash = sha256_hex(prev + kTab + rest.str());
@@ -294,16 +347,18 @@ void Ledger::append_session_open(const SessionRecord& rec, const std::string& as
 }
 
 void Ledger::append_session_close(const SessionRecord& rec, const std::string& asset_id, const std::string& currency,
-                                  const std::string& closed_at_utc) {
+                                  const std::string& closed_at_utc, const std::string& tariff_json) {
     context_currency_ = currency;
     context_timestamp_ = closed_at_utc;
-    append("session_close", asset_id, rec, json_session_line(rec, asset_id, currency, closed_at_utc));
+    context_tariff_ = tariff_json;
+    append("session_close", asset_id, rec, json_session_line(rec, asset_id, currency, closed_at_utc, tariff_json));
     SettledSession s;
     s.asset_id = asset_id;
     s.id = rec.id;
     s.record = rec;
     s.currency = currency;
     s.closed_at_utc = closed_at_utc;
+    s.tariff_json = tariff_json;
     sessions_.push_back(s);
 }
 
@@ -329,7 +384,9 @@ RecoveryReport Ledger::recover() {
 
     std::string prev = LEDGER_GENESIS_HASH;
     std::string line;
-    std::uint64_t lineno = 0;
+    std::uint64_t lineno = 0;  // Journal lines are tracked as they are seen, so each closing
+    // session can point back to its own opening evidence.
+    std::map<std::string, std::uint64_t> open_lines;
     while (std::getline(in, line)) {
         ++lineno;
         if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -391,6 +448,14 @@ RecoveryReport Ledger::recover() {
         rec.quality = parts.size() > 22 ? parts[22] : std::string();
         const std::string currency = parts.size() > 23 ? parts[23] : std::string();
         const std::string closed_at = parts.size() > 24 ? parts[24] : std::string();
+        // Forward-compatible tariff snapshot between v1.3.0 journals (which
+        // have the JSON payload in this slot) and v1.4.0 ones (which carry the
+        // tariff on it). Both are self-identifying, so the shape, not the
+        // position, is what settles it.
+        std::string tariff_json;
+        if (parts.size() > 26) {
+            tariff_json = parts[25];
+        }
 
         track(asset, rec, type);
         if (rec.closed) {
@@ -404,12 +469,26 @@ RecoveryReport Ledger::recover() {
             s.record = rec;
             s.currency = currency;
             s.closed_at_utc = closed_at;
+            s.tariff_json = tariff_json;
+            s.close_line = lineno;
+            s.close_prev_hash = parts[0];
+            s.close_hash = parts[1];
+            s.close_line_raw = line;
+            const std::string key = asset + "#" + std::to_string(rec.id);
+            const auto open_it = open_lines.find(key);
+            s.open_line = open_it != open_lines.end() ? open_it->second : 0;
             sessions_.push_back(s);
+            open_lines.erase(key);
         } else {
             ++rep.session_opens;
+            // Assigned, not emplaced: a session id reused for the same asset
+            // after a restart must point at its own opening line, and the entry
+            // is erased on close so a later reuse cannot inherit a stale one.
+            open_lines[asset + "#" + std::to_string(rec.id)] = lineno;
         }
     }
     rep.orphan_sessions = open_sessions_;
+    rep.last_hash = prev;
     last_hash_ = prev;
     lines_written_ = rep.lines;
     return rep;
@@ -457,6 +536,65 @@ bool Ledger::verify(std::string& error) const {
     return true;
 }
 
+std::string json_dispute(const SettledSession& s, const RecoveryReport& chain, const std::string& journal_path,
+                         const std::string& journal_sha256_hex) {
+    std::ostringstream o;
+    const auto& r = s.record;
+    const auto money = [](std::int64_t micro) { return format_fixed_point(micro, kMicroPerEuro); };
+    const auto u64 = [](std::uint64_t v) { return std::to_string(v); };
+    const auto flag = [](bool v) { return v ? "true" : "false"; };
+
+    o << "{\"schema\":\"charger.dispute.v1\""
+      << ",\"version\":\"" << VERSION << "\""
+      << ",\"purpose\":\"complete meter, tariff and calculation evidence for one charging session\""
+      << ",\"price_model\":\"ocpi-2.2.1-energy-time-flat\""
+      << ",\"vat\":\"omitted\"";
+
+    o << ",\"journal\":{\"path\":\"" << json_escape(journal_path) << "\""
+      << ",\"sha256\":\"" << json_escape(journal_sha256_hex) << "\""
+      << ",\"lines\":" << chain.lines << ",\"genesis\":\"" << LEDGER_GENESIS_HASH << "\""
+      << ",\"last_hash\":\"" << json_escape(chain.last_hash) << "\""
+      << ",\"chain_intact\":" << flag(chain.chain_intact);
+    if (!chain.orphan_sessions.empty()) o << ",\"orphan_sessions\":" << chain.orphan_sessions.size();
+    o << "}";
+
+    o << ",\"session\":{\"asset_id\":\"" << json_escape(s.asset_id) << "\""
+      << ",\"session_id\":" << s.id << ",\"currency\":\"" << json_escape(s.currency) << "\""
+      << ",\"closed_at_utc\":\"" << json_escape(s.closed_at_utc) << "\""
+      << ",\"quality\":\"" << json_escape(r.quality) << "\""
+      << ",\"billable\":" << flag(r.billing_complete) << ",\"stop_reason\":\"" << json_escape(r.stop_reason) << "\""
+      << ",\"energy_uwh\":\"" << u64(r.energy_uwh) << "\""
+      << ",\"energy_wh\":\"" << u64(r.energy_wh) << "\""
+      << ",\"billed_energy_wh\":\"" << u64(r.billed_energy_wh) << "\""
+      << ",\"charging_s\":" << r.charging_s << ",\"billed_time_s\":" << r.billed_time_s << ",\"energy_cost\":\""
+      << money(r.energy_cost_micro_eur) << "\""
+      << ",\"time_cost\":\"" << money(r.time_cost_micro_eur) << "\""
+      << ",\"flat_cost\":\"" << money(r.flat_cost_micro_eur) << "\""
+      << ",\"total_cost\":\"" << money(r.total_cost_micro_eur) << "\""
+      << ",\"total_cost_excl_vat\":\"" << money(r.total_cost_micro_eur) << "\""
+      << ",\"peak_power_mw\":" << r.peak_power_mw << ",\"min_voltage_mv\":" << r.min_voltage_mv
+      << ",\"max_current_ma\":" << r.max_current_ma << ",\"samples\":" << r.samples
+      << ",\"integration_gaps\":" << r.integration_gaps << ",\"undersampled\":" << flag(r.undersampled)
+      << ",\"energy_lower_bound\":" << flag(r.energy_lower_bound)
+      << ",\"time_upper_bound\":" << flag(r.time_upper_bound) << "}";
+
+    if (!s.tariff_json.empty()) o << ",\"tariff\":" << s.tariff_json;
+
+    o << ",\"provenance\":{\"journal_open_line\":" << s.open_line << ",\"journal_close_line\":" << s.close_line
+      << ",\"close_prev_hash\":\"" << json_escape(s.close_prev_hash) << "\""
+      << ",\"close_hash\":\"" << json_escape(s.close_hash) << "\""
+      << ",\"close_line_raw\":\"" << json_escape(s.close_line_raw) << "\"}";
+
+    o << ",\"verification\":{"
+      << "\"step_1\":\"verify the journal: each line hash chains as sha256(prev_hash TAB rest) and equals the next "
+         "line prev_hash; close_hash is one such link\""
+      << ",\"step_2\":\"verify this document against the file: sha256(journal file) equals journal.sha256\""
+      << ",\"step_3\":\"recompute the tariff: energy_cost + time_cost + flat_cost must equal total_cost, priced from "
+         "the embedded tariff block\""
+      << "}}";
+    return o.str();
+}
+
 std::optional<PortfolioKpi> Ledger::portfolio() const {
     if (per_asset_.empty()) return std::nullopt;
     PortfolioKpi out;
@@ -486,6 +624,219 @@ std::optional<PortfolioKpi> Ledger::portfolio() const {
         out.revenue_per_kwh_milli_micro_eur = static_cast<std::int64_t>(num / static_cast<WideInt>(out.energy_uwh));
     }
     return out;
+}
+
+namespace {
+
+std::string read_whole_file(const std::string& path, bool& ok) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        ok = false;
+        return {};
+    }
+    std::ostringstream buf;
+    buf << in.rdbuf();
+    ok = true;
+    return buf.str();
+}
+
+std::optional<JournalAnchor> parse_anchor_json(const std::string& text, std::string& error) {
+    JournalAnchor a;
+    const auto grab = [&](const char* key, std::string& out) {
+        const std::string k = std::string("\"") + key + "\"";
+        const auto pos = text.find(k);
+        if (pos == std::string::npos) {
+            error = std::string("anchor is missing '") + key + "'";
+            return false;
+        }
+        const auto c = text.find(':', pos + k.size());
+        const auto q1 = text.find('"', c);
+        const auto q2 = text.find('"', q1 + 1);
+        if (c == std::string::npos || q1 == std::string::npos || q2 == std::string::npos) {
+            error = std::string("anchor field '") + key + "' is malformed";
+            return false;
+        }
+        out = text.substr(q1 + 1, q2 - q1 - 1);
+        return true;
+    };
+    if (text.find(ANCHOR_SCHEMA) == std::string::npos) {
+        error = "anchor schema must be charger.anchor.v1";
+        return std::nullopt;
+    }
+    std::string lines_s;
+    if (!grab("journal_sha256", a.journal_sha256) || !grab("last_hash", a.last_hash) ||
+        !grab("anchored_at_utc", a.anchored_at_utc)) {
+        return std::nullopt;
+    }
+    if (!grab("lines", lines_s)) return std::nullopt;
+    std::uint64_t v = 0;
+    if (!parse_u64(lines_s, v)) {
+        error = "anchor lines is not a non-negative integer";
+        return std::nullopt;
+    }
+    a.lines = v;
+    if (a.journal_sha256.size() != 64 || a.last_hash.size() != 64) {
+        error = "anchor hashes must be 64 hex characters";
+        return std::nullopt;
+    }
+    return a;
+}
+
+}  // namespace
+
+bool write_journal_anchor(const std::string& journal_path, const std::string& anchor_path, JournalAnchor& out,
+                          std::string& error) {
+    if (journal_path.empty() || anchor_path.empty()) {
+        error = "journal and anchor paths are required";
+        return false;
+    }
+    std::string verr;
+    auto led = Ledger::open(journal_path, false, verr);
+    if (!led) {
+        error = verr;
+        return false;
+    }
+    if (!led->verify(verr)) {
+        error = "refusing to anchor a broken journal: " + verr;
+        return false;
+    }
+    const auto rep = led->recover();
+    if (!rep.chain_intact) {
+        error = "refusing to anchor: chain broken at line " + std::to_string(rep.first_broken_line);
+        return false;
+    }
+    bool ok = false;
+    const std::string whole = read_whole_file(journal_path, ok);
+    if (!ok) {
+        error = "cannot read journal: " + journal_path;
+        return false;
+    }
+    out.journal_sha256 = sha256_hex(whole);
+    out.last_hash = rep.last_hash;
+    out.lines = rep.lines;
+    out.anchored_at_utc = utc_timestamp();
+    std::ostringstream o;
+    o << "{\"schema\":\"" << ANCHOR_SCHEMA << "\",\"journal_sha256\":\"" << out.journal_sha256 << "\"";
+    o << ",\"last_hash\":\"" << out.last_hash << "\",\"lines\":\"" << out.lines << "\"";
+    o << ",\"anchored_at_utc\":\"" << out.anchored_at_utc << "\"}";
+    std::ofstream f(anchor_path, std::ios::binary | std::ios::trunc);
+    if (!f) {
+        error = "cannot write anchor: " + anchor_path;
+        return false;
+    }
+    f << o.str() << '\n';
+    f.flush();
+    if (!f) {
+        error = "failed while writing anchor: " + anchor_path;
+        return false;
+    }
+    return true;
+}
+
+bool verify_journal_anchor(const std::string& journal_path, const std::string& anchor_path,
+                           std::uint64_t& appended_lines, std::string& error) {
+    appended_lines = 0;
+    bool ok = false;
+    const std::string anchor_text = read_whole_file(anchor_path, ok);
+    if (!ok) {
+        error = "cannot read anchor: " + anchor_path;
+        return false;
+    }
+    std::string perr;
+    const auto anchor = parse_anchor_json(anchor_text, perr);
+    if (!anchor) {
+        error = perr;
+        return false;
+    }
+    std::string verr;
+    auto led = Ledger::open(journal_path, false, verr);
+    if (!led) {
+        error = verr;
+        return false;
+    }
+    if (!led->verify(verr)) {
+        error = verr;
+        return false;
+    }
+    const auto rep = led->recover();
+    if (!rep.chain_intact) {
+        error = "chain broken at line " + std::to_string(rep.first_broken_line);
+        return false;
+    }
+    if (rep.lines < anchor->lines) {
+        error = "journal is shorter than the anchor (" + std::to_string(rep.lines) + " < " +
+                std::to_string(anchor->lines) + "): lines were removed";
+        return false;
+    }
+    // Re-walk the prefix and confirm line N still hashes to the anchored hash.
+    std::ifstream in(journal_path, std::ios::binary);
+    std::string prev = LEDGER_GENESIS_HASH;
+    std::string line;
+    std::uint64_t lineno = 0;
+    std::string hash_at_anchor = LEDGER_GENESIS_HASH;
+    while (std::getline(in, line)) {
+        ++lineno;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
+        const auto parts = split(line, '\t');
+        if (parts.size() < 4) {
+            error = "line " + std::to_string(lineno) + ": malformed record";
+            return false;
+        }
+        std::ostringstream rest;
+        for (std::size_t i = 2; i < parts.size(); ++i) {
+            if (i > 2) rest << kTab;
+            rest << parts[i];
+        }
+        const std::string recomputed = sha256_hex(parts[0] + kTab + rest.str());
+        if (parts[0] != prev || parts[1] != recomputed) {
+            error = "line " + std::to_string(lineno) + ": chain mismatch";
+            return false;
+        }
+        prev = parts[1];
+        if (lineno == anchor->lines) hash_at_anchor = parts[1];
+        if (lineno > anchor->lines && anchor->lines == 0) break;
+    }
+    if (hash_at_anchor != anchor->last_hash) {
+        error = "anchor mismatch: line " + std::to_string(anchor->lines) + " no longer hashes to " +
+                anchor->last_hash + ": the prefix was rewritten";
+        return false;
+    }
+    appended_lines = rep.lines > anchor->lines ? rep.lines - anchor->lines : 0;
+    return true;
+}
+
+std::string json_cdr(const SettledSession& s) {
+    const auto& r = s.record;
+    const auto money = [](std::int64_t micro) { return format_fixed_point(micro, kMicroPerEuro); };
+    std::ostringstream o;
+    o << "{\"schema\":\"charger.cdr.v1\"";
+    o << ",\"cdr_id\":\"" << json_escape(s.asset_id) << "-" << s.id << "\"";
+    o << ",\"session_id\":\"" << json_escape(s.asset_id) << "-" << s.id << "\"";
+    o << ",\"asset_id\":\"" << json_escape(s.asset_id) << "\"";
+    o << ",\"currency\":\"" << json_escape(s.currency) << "\"";
+    // The journal stores a wall-clock label only for the close; the start is
+    // close minus the measured duration, so it is derived, not measured.
+    o << ",\"derived_start_utc\":\"close-minus-duration\"";
+    o << ",\"end_utc\":\"" << json_escape(s.closed_at_utc) << "\"";
+    o << ",\"duration_ms\":" << r.duration_ms;
+    o << ",\"charging_s\":" << r.charging_s;
+    o << ",\"energy_wh\":\"" << r.energy_wh << "\"";
+    o << ",\"energy_uwh\":\"" << r.energy_uwh << "\"";
+    o << ",\"billed_energy_wh\":\"" << r.billed_energy_wh << "\"";
+    o << ",\"billed_time_s\":" << r.billed_time_s;
+    o << ",\"costs\":{\"energy\":\"" << money(r.energy_cost_micro_eur) << "\",\"time\":\"";
+    o << money(r.time_cost_micro_eur) << "\",\"flat\":\"" << money(r.flat_cost_micro_eur) << "\",\"total_excl_vat\":\"";
+    o << money(r.total_cost_micro_eur) << "\"}";
+    o << ",\"vat\":\"omitted\"";
+    o << ",\"billable\":" << (r.billing_complete ? "true" : "false");
+    o << ",\"stop_reason\":\"" << json_escape(r.stop_reason) << "\"";
+    o << ",\"quality\":\"" << json_escape(r.quality) << "\"";
+    if (!s.tariff_json.empty()) o << ",\"tariff\":" << s.tariff_json;
+    o << ",\"provenance\":{\"journal_open_line\":" << s.open_line << ",\"journal_close_line\":" << s.close_line;
+    o << ",\"close_hash\":\"" << json_escape(s.close_hash) << "\"}";
+    o << ",\"note\":\"local evidence for an OCPI CDR; signed exchange stays in the backend\"}";
+    return o.str();
 }
 
 }  // namespace charger

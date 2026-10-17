@@ -8,11 +8,22 @@
 //   charger_settle <journal>                 CSV to stdout
 //   charger_settle <journal> --summary       human-readable totals
 //   charger_settle <journal> --out FILE.csv  write to a file
+//   charger_settle <journal> --dispute ASSET SESSION_ID
+//                                            complete dispute evidence pack
+//                                            (charger.dispute.v1 JSON)
+//   charger_settle <journal> --cdr ASSET SESSION_ID
+//                                            OCPI CDR subset (charger.cdr.v1 JSON)
+//   charger_settle <journal> --check-tou tou.json
+//                                            validate a TOU tariff file and its 24 h coverage
+//   charger_settle <journal> --tou-settle tou.json [--summary] [--out FILE]
+//                                            exact ledger CSV plus a TOU *estimate* column
+//                                            (constant-power apportionment, labelled, never the invoice)
 //
 // Exit codes: 0 settled, 2 usage or verification error, 3 journal altered.
 
 #include <charger_ledger.hpp>
 #include <charger_monitor.hpp>
+#include <charger_tou.hpp>
 
 #include <cstdio>
 #include <fstream>
@@ -30,7 +41,30 @@ struct Options {
     std::string out;
     bool summary{false};
     bool verify_only{false};
+    // Dispute pack: --dispute ASSET SESSION_ID.
+    bool dispute{false};
+    std::string dispute_asset;
+    std::uint64_t dispute_session{0};
+    // OCPI CDR subset: --cdr ASSET SESSION_ID.
+    bool cdr{false};
+    std::string cdr_asset;
+    std::uint64_t cdr_session{0};
+    // TOU tariff file: --check-tou FILE validates only; --tou-settle FILE adds
+    // the estimate column to the settlement CSV.
+    std::string check_tou;
+    std::string tou_settle;
 };
+
+bool parse_u64(const std::string& s, std::uint64_t& out) {
+    if (s.empty()) return false;
+    std::uint64_t v = 0;
+    for (char c : s) {
+        if (c < '0' || c > '9') return false;
+        v = v * 10 + static_cast<std::uint64_t>(c - '0');
+    }
+    out = v;
+    return true;
+}
 
 bool parse_args(int argc, char** argv, Options& opt, std::string& err) {
     for (int i = 1; i < argc; ++i) {
@@ -39,6 +73,40 @@ bool parse_args(int argc, char** argv, Options& opt, std::string& err) {
             opt.summary = true;
         } else if (a == "--verify-only") {
             opt.verify_only = true;
+        } else if (a == "--dispute") {
+            opt.dispute = true;
+            if (i + 2 >= argc) {
+                err = "--dispute needs ASSET SESSION_ID, e.g. --dispute bay-07 12";
+                return false;
+            }
+            opt.dispute_asset = argv[++i];
+            if (!parse_u64(argv[++i], opt.dispute_session)) {
+                err = "the session id must be a non-negative integer";
+                return false;
+            }
+        } else if (a == "--cdr") {
+            opt.cdr = true;
+            if (i + 2 >= argc) {
+                err = "--cdr needs ASSET SESSION_ID, e.g. --cdr bay-07 12";
+                return false;
+            }
+            opt.cdr_asset = argv[++i];
+            if (!parse_u64(argv[++i], opt.cdr_session)) {
+                err = "the session id must be a non-negative integer";
+                return false;
+            }
+        } else if (a == "--check-tou") {
+            if (i + 1 >= argc) {
+                err = "--check-tou needs a tariff file";
+                return false;
+            }
+            opt.check_tou = argv[++i];
+        } else if (a == "--tou-settle") {
+            if (i + 1 >= argc) {
+                err = "--tou-settle needs a tariff file";
+                return false;
+            }
+            opt.tou_settle = argv[++i];
         } else if (a == "--out") {
             if (i + 1 >= argc) {
                 err = "--out needs a path";
@@ -79,17 +147,116 @@ std::string csv_escape(const std::string& s) {
     return out;
 }
 
+// Parses "YYYY-MM-DDTHH:MM:SSZ" (UTC, as written by utc_timestamp()) into
+// epoch seconds. Returns false rather than guessing: a TOU estimate built on
+// a misread clock would silently move energy into the wrong window.
+bool parse_close_utc(const std::string& s, std::int64_t& epoch) {
+    int Y = 0, M = 0, D = 0, h = 0, m = 0, sec = 0;
+    if (s.size() != 20 || s[4] != '-' || s[7] != '-' || s[10] != 'T' || s[13] != ':' || s[16] != ':' ||
+        s[19] != 'Z') {
+        return false;
+    }
+    const auto digits = [&](std::size_t pos, std::size_t n, int& out) {
+        int v = 0;
+        for (std::size_t i = 0; i < n; ++i) {
+            const char c = s[pos + i];
+            if (c < '0' || c > '9') return false;
+            v = v * 10 + (c - '0');
+        }
+        out = v;
+        return true;
+    };
+    if (!digits(0, 4, Y) || !digits(5, 2, M) || !digits(8, 2, D) || !digits(11, 2, h) || !digits(14, 2, m) ||
+        !digits(17, 2, sec)) {
+        return false;
+    }
+    if (M < 1 || M > 12 || D < 1 || D > 31 || h > 23 || m > 59 || sec > 60) return false;
+    // Days-from-civil (Howard Hinnant) to epoch, UTC, no libc timezone state.
+    const int y = M <= 2 ? Y - 1 : Y;
+    const int era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = static_cast<unsigned>(y - era * 400);
+    const unsigned mp = static_cast<unsigned>((M + 9) % 12);
+    const unsigned doy = (153 * mp + 2) / 5 + static_cast<unsigned>(D - 1);
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    const std::int64_t days = static_cast<std::int64_t>(era) * 146097 + static_cast<std::int64_t>(doe) - 719468;
+    epoch = days * 86400 + h * 3600 + m * 60 + sec;
+    return true;
+}
+
+std::string read_file_text(const std::string& path, bool& ok) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        ok = false;
+        return {};
+    }
+    std::ostringstream buf;
+    buf << in.rdbuf();
+    ok = true;
+    return buf.str();
+}
+
+// TOU estimate for one session under an explicit, documented assumption:
+// constant power across the session (linear energy apportionment over the
+// measured duration). The journal stores exact totals; it does not store the
+// per-second time series a windowed price would need, so this column is an
+// estimate for night-load shifting analysis, never the invoice. Returns false
+// with reason when the estimate cannot be built honestly.
+bool tou_estimate_session(const TimeOfUse& tou, const SettledSession& s, std::int64_t& estimate_micro,
+                          std::string& windows_note, std::string& reason) {
+    std::int64_t close_epoch = 0;
+    if (!parse_close_utc(s.closed_at_utc, close_epoch)) {
+        reason = "closed_at_utc is not parseable UTC; estimate refused";
+        return false;
+    }
+    if (s.record.duration_ms < 1000 || s.record.energy_uwh == 0) {
+        reason = "session too short or zero energy; nothing to apportion";
+        return false;
+    }
+    const std::int64_t dur_s = s.record.duration_ms / 1000;
+    const std::int32_t close_sod = second_of_day_utc(close_epoch);
+    const std::int32_t start_sod =
+        static_cast<std::int32_t>((static_cast<std::int64_t>(close_sod) - (dur_s % 86400) + 86400) % 86400);
+    const std::int64_t total = static_cast<std::int64_t>(s.record.energy_uwh);
+    const std::vector<TimeSample> samples{{0, 0, start_sod}, {dur_s * 1000, total, close_sod}};
+    std::string perr;
+    const auto r =
+        price_time_of_use_strict(tou, samples, s.record.flat_cost_micro_eur, 1, 1, perr);
+    if (!r) {
+        reason = perr;
+        return false;
+    }
+    estimate_micro = r->total_cost_micro_eur;
+    std::ostringstream note;
+    for (std::size_t i = 0; i < r->periods.size(); ++i) {
+        if (i > 0) note << '+';
+        note << r->periods[i].window << ':' << r->periods[i].duration_ms / 1000 << 's';
+    }
+    windows_note = note.str();
+    return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     Options opt;
     std::string err;
     if (!parse_args(argc, argv, opt, err)) {
-        std::cerr << err << "\nUsage: charger_settle <journal> [--summary] [--verify-only] [--out FILE]\n";
+        std::cerr << err << "\nUsage: charger_settle <journal> [--summary] [--verify-only] [--out FILE]\n"
+                  << "       charger_settle <journal> --dispute ASSET SESSION_ID\n"
+                  << "       charger_settle <journal> --cdr ASSET SESSION_ID\n"
+                  << "       charger_settle <journal> --check-tou tou.json\n"
+                  << "       charger_settle <journal> --tou-settle tou.json [--summary] [--out FILE]\n";
         return 2;
     }
 
     std::string verr;
+    // A missing file is an I/O problem (exit 2), not evidence of tampering
+    // (exit 3): an audit step must not cry tamper over a mistyped path.
+    std::ifstream probe(opt.journal, std::ios::binary);
+    if (!probe) {
+        std::cerr << "cannot read journal: " << opt.journal << '\n';
+        return 2;
+    }
     auto led = Ledger::open(opt.journal, false, verr);
     if (!led) {
         std::cerr << "cannot open journal: " << verr << '\n';
@@ -100,6 +267,113 @@ int main(int argc, char** argv) {
         return 3;
     }
     const auto rep = led->recover();
+    if (!opt.check_tou.empty()) {
+        bool ok = false;
+        const std::string text = read_file_text(opt.check_tou, ok);
+        if (!ok) {
+            std::cerr << "cannot read TOU tariff: " << opt.check_tou << '\n';
+            return 2;
+        }
+        const auto loaded = parse_tou_json(text);
+        if (!loaded.ok) {
+            std::cerr << "TOU tariff refused: " << loaded.error << '\n';
+            return 2;
+        }
+        const auto cov = tou_coverage(loaded.tou);
+        std::cout << "TOU tariff " << opt.check_tou << ": " << loaded.tou.windows.size() << " window(s)";
+        if (loaded.tou.fallback.has_value()) std::cout << " + fallback '" << loaded.tou.fallback->name << '\'';
+        std::cout << "\n  covered " << cov.covered_s << " s, uncovered " << cov.uncovered_s << " s of 86400\n";
+        if (!cov.full) {
+            std::cerr << "TOU tariff incomplete: " << cov.uncovered_s
+                      << " s would be priced at zero; settlement refused until windows or fallback cover the day\n";
+            return 2;
+        }
+        std::cout << "TOU tariff complete: every second of the day is priced\n";
+        return 0;
+    }
+    if (opt.cdr) {
+        const SettledSession* found = nullptr;
+        for (const auto& s : led->sessions()) {
+            if (s.asset_id == opt.cdr_asset && s.id == opt.cdr_session) {
+                found = &s;
+                break;
+            }
+        }
+        if (found == nullptr) {
+            std::cerr << "no closed session " << opt.cdr_asset << " #" << opt.cdr_session
+                      << " in a verified journal\n";
+            return 2;
+        }
+        const std::string cdr = json_cdr(*found);
+        if (opt.out.empty()) {
+            std::cout << cdr << '\n';
+        } else {
+            std::ofstream fout(opt.out, std::ios::binary);
+            if (!fout) {
+                std::cerr << "cannot write " << opt.out << '\n';
+                return 2;
+            }
+            fout << cdr << '\n';
+        }
+        return 0;
+    }
+    // Optional TOU estimate layer: validated first, refused if incomplete.
+    // The exact ledger CSV stays the invoice of record; the estimate column is
+    // constant-power apportionment for night-load analysis, labelled as such.
+    const TimeOfUse* tou = nullptr;
+    TimeOfUse tou_owned;
+    if (!opt.tou_settle.empty()) {
+        bool ok = false;
+        const std::string text = read_file_text(opt.tou_settle, ok);
+        if (!ok) {
+            std::cerr << "cannot read TOU tariff: " << opt.tou_settle << '\n';
+            return 2;
+        }
+        const auto loaded = parse_tou_json(text);
+        if (!loaded.ok) {
+            std::cerr << "TOU tariff refused: " << loaded.error << '\n';
+            return 2;
+        }
+        const auto cov = tou_coverage(loaded.tou);
+        if (!cov.full) {
+            std::cerr << "TOU tariff incomplete: " << cov.uncovered_s
+                      << " s would be priced at zero; --tou-settle refused\n";
+            return 2;
+        }
+        tou_owned = loaded.tou;
+        tou = &tou_owned;
+    }
+    if (opt.dispute) {
+        const SettledSession* found = nullptr;
+        for (const auto& s : led->sessions()) {
+            if (s.asset_id == opt.dispute_asset && s.id == opt.dispute_session) {
+                found = &s;
+                break;
+            }
+        }
+        if (found == nullptr) {
+            std::cerr << "no closed session " << opt.dispute_asset << " #" << opt.dispute_session
+                      << " in a verified journal\n";
+            return 2;
+        }
+        // The digest of the whole file is the first thing an auditor checks:
+        // it pins exactly which bytes the pack was built from.
+        std::ifstream fin(opt.journal, std::ios::binary);
+        std::ostringstream whole;
+        whole << fin.rdbuf();
+        const std::string dispute = json_dispute(*found, rep, opt.journal, sha256_hex(whole.str()));
+        if (opt.out.empty()) {
+            std::cout << dispute << '\n';
+        } else {
+            std::ofstream fout(opt.out, std::ios::binary);
+            if (!fout) {
+                std::cerr << "cannot write " << opt.out << '\n';
+                return 2;
+            }
+            fout << dispute << '\n';
+        }
+        return 0;
+    }
     if (opt.verify_only) {
         std::cout << "journal verified: " << rep.lines << " lines, " << rep.session_closes << " closed sessions\n";
         return 0;
@@ -112,7 +386,10 @@ int main(int argc, char** argv) {
     std::ostringstream csv;
     csv << "asset_id,session_id,closed_at_utc,quality,billable,stop_reason,energy_wh,billed_energy_wh,"
            "charging_s,billed_time_s,energy_eur,time_eur,flat_eur,total_eur,currency,energy_lower_bound,"
-           "time_upper_bound\n";
+           "time_upper_bound";
+    if (tou != nullptr) csv << ",tou_estimate_eur,tou_windows,tou_note";
+    csv << '\n';
+    std::uint64_t tou_ok = 0, tou_refused = 0;
     for (const auto& s : led->sessions()) {
         const auto& r = s.record;
         const auto money = [](std::int64_t micro) { return format_fixed_point(micro, 1000000); };
@@ -121,7 +398,19 @@ int main(int argc, char** argv) {
             << ',' << r.energy_wh << ',' << r.billed_energy_wh << ',' << r.charging_s << ',' << r.billed_time_s << ','
             << money(r.energy_cost_micro_eur) << ',' << money(r.time_cost_micro_eur) << ','
             << money(r.flat_cost_micro_eur) << ',' << money(r.total_cost_micro_eur) << ',' << csv_escape(s.currency)
-            << ',' << (r.energy_lower_bound ? "yes" : "no") << ',' << (r.time_upper_bound ? "yes" : "no") << '\n';
+            << ',' << (r.energy_lower_bound ? "yes" : "no") << ',' << (r.time_upper_bound ? "yes" : "no");
+        if (tou != nullptr) {
+            std::int64_t est = 0;
+            std::string windows, reason;
+            if (tou_estimate_session(*tou, s, est, windows, reason)) {
+                ++tou_ok;
+                csv << ',' << money(est) << ',' << csv_escape(windows) << ",constant-power-estimate";
+            } else {
+                ++tou_refused;
+                csv << ",," << csv_escape(std::string("refused: ") + reason);
+            }
+        }
+        csv << '\n';
 
         if (r.billing_complete) {
             ++billable;
@@ -164,6 +453,10 @@ int main(int argc, char** argv) {
         std::printf("  TIME                %s EUR\n", eur(time_cost).c_str());
         std::printf("  FLAT                %s EUR\n", eur(flat_cost).c_str());
         std::printf("  invoice total       %s EUR  (excl. VAT)\n", eur(billable_revenue).c_str());
+        if (tou != nullptr) {
+            std::printf("  TOU estimates       %llu priced, %llu refused (constant-power apportionment, not invoiced)\n",
+                        (unsigned long long)tou_ok, (unsigned long long)tou_refused);
+        }
         if (held > 0) {
             std::printf("\n  held (not invoiced) %s EUR across %llu session(s)\n", eur(held_revenue).c_str(),
                         (unsigned long long)held);

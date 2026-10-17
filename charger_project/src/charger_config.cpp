@@ -1,5 +1,7 @@
 #include "charger_config.hpp"
 
+#include "charger_dbc.hpp"
+
 #include <cctype>
 #include <cstdlib>
 #include <sstream>
@@ -134,12 +136,17 @@ void parse_tariff(const std::string& text, Tariff& t, const std::string& prefix,
         errors.push_back({prefix, "expected a JSON object"});
         return;
     }
-    while (!p.eof() && !p.lit('}')) {
+    while (!p.lit('}')) {
+        if (p.eof()) {
+            errors.push_back({prefix, "unterminated object: the closing brace is missing"});
+            return;
+        }
         const auto key = take_key(p);
         if (!key) {
             errors.push_back({prefix, "invalid key"});
             return;
         }
+
         if (*key == "energy_eur_per_kwh" || *key == "time_eur_per_hour" || *key == "flat_eur" ||
             *key == "min_price_eur" || *key == "max_price_eur") {
             const auto v = p.parse_value_as_string();
@@ -214,7 +221,11 @@ void parse_diagnostics(const std::string& text, Config& cfg, std::vector<ConfigE
         errors.push_back({"diagnostics", "expected a JSON object"});
         return;
     }
-    while (!p.eof() && !p.lit('}')) {
+    while (!p.lit('}')) {
+        if (p.eof()) {
+            errors.push_back({"diagnostics", "unterminated object: the closing brace is missing"});
+            return;
+        }
         const auto key = take_key(p);
         if (!key) {
             errors.push_back({"diagnostics", "invalid key"});
@@ -283,7 +294,11 @@ void parse_protocol(const std::string& text, ProtocolProfile& proto, std::vector
         errors.push_back({"protocol", "expected a JSON object"});
         return;
     }
-    while (!p.eof() && !p.lit('}')) {
+    while (!p.lit('}')) {
+        if (p.eof()) {
+            errors.push_back({"protocol", "unterminated object: the closing brace is missing"});
+            return;
+        }
         const auto key = take_key(p);
         if (!key) {
             errors.push_back({"protocol", "invalid key"});
@@ -416,14 +431,21 @@ std::string skip_value(const std::string& s, std::size_t& i) {
 
 }  // namespace
 
-ConfigLoadResult parse_config(const std::string& text) {
+ConfigLoadResult parse_config(const std::string& text, const std::string& dbc_text) {
     ConfigLoadResult res;
     Parser p{text, 0, &res.errors};
     if (!p.lit('{')) {
-        res.errors.push_back({"$", ": expected a JSON object at the root"});
+        res.errors.push_back({"$", "expected a JSON object at the root"});
         return res;
     }
-    while (!p.eof() && !p.lit('}')) {
+    // The object must be closed. A truncated document (a write interrupted by
+    // a power cut) would otherwise be accepted with only the fields that
+    // happened to parse, which for a billing config means silent zero pricing.
+    while (!p.lit('}')) {
+        if (p.eof()) {
+            res.errors.push_back({"$", "unterminated object: the closing brace is missing"});
+            return res;
+        }
         const auto key = take_key(p);
         if (!key) {
             res.errors.push_back({"$", "invalid key"});
@@ -503,6 +525,26 @@ ConfigLoadResult parse_config(const std::string& text) {
         }
         p.lit(',');
     }
+    // The schema is mandatory: it is the version gate that protects the
+    // compatibility contract. Without it a file written for a future version
+    // could be read as if it meant today's fields.
+    if (res.schema.empty()) {
+        res.errors.push_back(
+            {"schema", "missing: the schema field is required and must be " + std::string(CONFIG_SCHEMA)});
+    }
+    // Adoption path: when a vendor DBC is supplied it must parse cleanly, and the
+    // configured measurement id must exist in it. Signal-level binding stays an
+    // explicit, caller-side decision rather than a silent guess.
+    if (!dbc_text.empty() && res.errors.empty()) {
+        const auto db = parse_dbc(dbc_text);
+        if (!db.ok) {
+            std::string detail = "failed to parse the vendor database";
+            if (!db.errors.empty()) detail += " at line " + std::to_string(db.errors.front().first);
+            res.errors.push_back({"dbc", detail});
+        } else if (db.database.find_by_id(res.config.protocol.measurement_id) == nullptr) {
+            res.errors.push_back({"dbc", "the configured measurement id is not present in the vendor database"});
+        }
+    }
     // A second Monitor construction validates cross-field invariants (ranges,
     // step sizes, currency shape) with one uniform error surface.
     if (res.errors.empty()) {
@@ -515,6 +557,37 @@ ConfigLoadResult parse_config(const std::string& text) {
     }
     res.ok = res.errors.empty();
     return res;
+}
+
+std::string describe_dbc(const std::string& dbc_text) {
+    const auto r = parse_dbc(dbc_text);
+    if (!r.ok) {
+        std::string out = "DBC parse failed with " + std::to_string(r.errors.size()) + " error(s):\n";
+        for (const auto& e : r.errors) out += "  line " + std::to_string(e.first) + ": " + e.second + "\n";
+        return out;
+    }
+    std::ostringstream o;
+    o << "DBC " << (r.database.version.empty() ? std::string("(no version)") : r.database.version) << "\n";
+    o << "  nodes: " << r.database.nodes.size() << "\n";
+    o << "  messages: " << r.database.messages.size() << "\n";
+    for (const auto& m : r.database.messages) {
+        o << "  BO_ 0x" << std::hex << m.can_id << std::dec << " " << m.name << " [" << m.length << " bytes, "
+          << m.signals.size() << " signals]\n";
+        for (const auto& s : m.signals) {
+            o << "      " << s.name << " start=" << s.start_bit << " len=" << s.length_bits
+              << (s.little_endian ? " intel" : " motorola") << (s.is_signed ? " signed" : " unsigned")
+              << " factor=" << s.factor << " offset=" << s.offset << " unit=" << s.unit << "\n";
+            for (const auto& v : s.values) {
+                o << "        " << v.first << " = " << v.second << "\n";
+            }
+        }
+    }
+    if (!r.skipped_sections.empty()) {
+        o << "  sections recognised and skipped:";
+        for (const auto& s : r.skipped_sections) o << ' ' << s;
+        o << "\n";
+    }
+    return o.str();
 }
 
 std::string json_config_example() {

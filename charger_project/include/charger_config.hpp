@@ -36,8 +36,15 @@ struct ConfigLoadResult {
 // Parses a config document. Every field is optional: anything absent keeps the
 // library default, so a minimal file is valid. Unknown fields are reported as
 // errors, because a misspelled tariff must not silently stay at zero.
-ConfigLoadResult parse_config(const std::string& text);
+//
+// When `dbc_text` is non-empty the vendor DBC is parsed and bound, so a bay can
+// be adopted by pointing at the manufacturer's database file. Signals named in
+// the config must exist in the DBC, otherwise the config is rejected.
+ConfigLoadResult parse_config(const std::string& text, const std::string& dbc_text = std::string());
 
 std::string json_config_example();
+
+// Human-readable summary of a loaded DBC, for the CLI.
+std::string describe_dbc(const std::string& dbc_text);
 
 }  // namespace charger

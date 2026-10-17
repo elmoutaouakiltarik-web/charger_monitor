@@ -16,7 +16,7 @@
 
 namespace charger {
 
-constexpr const char* VERSION = "1.3.0";
+constexpr const char* VERSION = "1.4.0";
 constexpr const char* PROJECT_NAME = "charger_monitor";
 constexpr const char* SNAPSHOT_SCHEMA = "charger.snapshot.v1";
 constexpr const char* SESSION_SCHEMA = "charger.session.v1";
@@ -315,8 +315,15 @@ std::string to_string(ChargeState state);
 std::string to_string(EventLevel level);
 const char* recommended_action(const std::string& code) noexcept;
 std::string json_snapshot(const Snapshot& snapshot);
+
+// A self-contained evidence block for the tariff that priced a session, in
+// exact integer micro-EUR. Embedded in the session JSON and in the journal
+// close line so a dispute can be re-verified years later, even when the
+// running configuration has changed in between.
+std::string json_tariff_block(const Tariff& tariff);
+
 std::string json_session_line(const SessionRecord& rec, const std::string& asset_id, const std::string& currency,
-                              const std::string& closed_at_utc);
+                              const std::string& closed_at_utc, const std::string& tariff_json = {});
 std::string utc_timestamp();
 
 // "1.25" with scale 1_000_000 -> 1250000. Scale must be a power of ten.
