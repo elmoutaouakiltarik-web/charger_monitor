@@ -1,9 +1,10 @@
 # charger_monitor
 
-[![CI](https://github.com/elmoutaouakiltarik-web/charger_monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/elmoutaouakiltarik-web/charger_monitor/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/elmoutaouakiltarik-web/charger_monitor.svg)](https://github.com/elmoutaouakiltarik-web/charger_monitor/releases/latest)
 [![C++](https://img.shields.io/badge/c%2B%2B-17-blue.svg)](charger_project/CMakeLists.txt)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Dependencies](https://img.shields.io/badge/dependencies-none-success.svg)](CONTRIBUTING.md)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey.svg)](CONTRIBUTING.md)
 
 Deterministic monitoring library for industrial DC charger bays.
 
@@ -191,7 +192,18 @@ zero-dependency property is not on the list.
 
 ## Verification
 
-CI runs on every push:
+Everything below runs on every push. GitHub Actions is currently disabled on
+this repository account (billing), so run the same checks locally:
+
+```bash
+ctest --test-dir build --output-on-failure     # state machine, ledger, tools
+bash charger_project/scripts/e2e_replay.sh      # state sequence + tamper detection
+bash charger_project/scripts/consume_test.sh    # downstream find_package consumer
+./build/charger_demo                            # the narrated walkthrough
+./build/charger_bench                           # measured exactness and throughput
+```
+
+The workflow is configured and ready:
 
 | Job | What it proves |
 | --- | --- |
@@ -201,9 +213,13 @@ CI runs on every push:
 | fuzz (libFuzzer, 20 s) | No crash on malformed frames, tariffs or journal rows |
 | end-to-end replay | The documented state sequence and ledger contract |
 | journal tamper detection | A modified journal fails verification with a non-zero exit |
-| tool smoke tests | The demo and settlement tools run and assert exact figures |
+| tool smoke tests | The demo and settlement tools assert exact figures |
 | consumable package | An external project can `find_package` and link it |
 | clang-format | Formatting matches `.clang-format` |
+
+Locally verified on GCC 16.1 (MinGW, Windows) and GCC on WSL2: build clean under
+`-Werror`, all tests pass, e2e and downstream consumer pass, demo and benchmark
+run.
 
 ## License
 
