@@ -49,6 +49,14 @@ This library treats the ledger as the product:
 | Guesswork about when to invoice | `billing_complete` is true only when the data is complete. Everything else is held for review |
 | "Which bay earns?" | Fleet rollup across assets, rebuildable from a journal with no running process |
 | Finding a failing connector before it fails | Predictive diagnostics that raise advisories and **never block charging** |
+| A dispute three years later | `charger_settle --dispute` exports meter → tariff of record → calculation → chain provenance in one audit-ready JSON, verifiable with standard tools |
+| A real vendor fleet, not a demo protocol | One `.dbc` file wires the OEM wire format: ids, offsets, endianness and exact scales, validated bit-exactly against cantools |
+
+## How it fits together
+
+<p align="center">
+  <img src="docs/architecture.png" alt="Inputs flow into the charger_core modules, which feed the journal, dispute evidence, fleet KPI and tools" width="880">
+</p>
 
 **Zero external dependencies.** Everything is the C++17 standard library. An
 industrial operator has to audit what it ships, and a dependency tree is a
@@ -76,8 +84,23 @@ they double as a compile-time check that the public headers are self-contained.
 | Tool | What it is for |
 | --- | --- |
 | [`charger_demo`](charger_project/tools/charger_demo) | Narrated walkthrough: cold start, session, dropout, diagnostics, crash recovery, fleet rollup |
-| [`charger_settle`](charger_project/tools/charger_settle) | Billing settlement from a journal: a CSV of invoice-now vs held-for-review, with the reason each held session was held |
+| [`charger_settle`](charger_project/tools/charger_settle) | Billing settlement from a journal: a CSV of invoice-now vs held-for-review, with the reason each held session was held; `--dispute ASSET ID` exports the complete evidence pack for one disputed session; `--cdr` exports the OCPI CDR subset; `--check-tou` / `--tou-settle` validate a windowed tariff and add a labelled night-load estimate |
 | [`charger_bench`](charger_project/tools/charger_bench) | Measures exactness against a double accumulator, and throughput |
+
+```bash
+# The dispute pack: everything needed to answer "why 5.30 EUR?"
+./build/charger_settle bay.journal --dispute bay-07 12
+# Pin the journal prefix into an external anchor (append-only storage):
+./build/charger_monitor --anchor-journal --journal bay.journal --anchor-file /mnt/worm/bay-07.anchor
+./build/charger_monitor --verify-anchor --journal bay.journal --anchor-file /mnt/worm/bay-07.anchor
+# Validate a windowed tariff, then estimate night-load shifting (labelled, never invoiced):
+./build/charger_settle bay.journal --check-tou tou.json
+./build/charger_settle bay.journal --tou-settle tou.json --summary
+# A vendor fleet, adopted from the manufacturer's own CAN database:
+# --dbc validates it, the named signals rewire the decode exactly.
+./build/charger_monitor --replay < frames.txt --dbc vendor.dbc \
+    --voltage-signal DC_Voltage --current-signal DC_Current
+```
 
 `charger_bench` prints measured numbers, not claims:
 
@@ -88,8 +111,19 @@ they double as a compile-time check that the public headers are self-contained.
   throughput       1117142 frames/s
 ```
 
+The exactness rows are reproducible: any machine, any build, the integer path
+agrees with the closed-form answer and the double path does not. The throughput
+row is **not** — it was measured on the reference machine with a Release build,
+and the same source gives a different figure elsewhere (a Debug build on this
+machine reports about 0.49 M frames/s, the Release build about 1.6 M). Quote the
+ratio, not the figure.
+
 A 500 kbit/s CAN bus at 1 Hz delivers roughly 3 500 frames/s, so throughput is
 not a constraint here. Exactness is.
+
+<p align="center">
+  <img src="docs/exactness.png" alt="The integer accumulator stays exact where a double accumulator drifts by 1 uWh and 1 uEUR" width="880">
+</p>
 
 ## Use it as a library
 
@@ -109,18 +143,31 @@ charger::Config cfg;
 cfg.tariff.energy_micro_eur_per_kwh = 250000;   // 0.25 EUR, exact integers
 charger::Monitor monitor(cfg);
 
-const auto snapshot = monitor.snapshot();
+// The core is deterministic: pass the timestamp explicitly so replay and
+// regression tests reproduce bit-for-bit without a wall clock.
+const auto now = charger::Clock::now();
+monitor.ingest(frame);
+monitor.tick(now);
+const auto snapshot = monitor.snapshot(now);
 if (snapshot.last_session && snapshot.last_session->billing_complete) {
     invoice(snapshot.last_session->total_cost_micro_eur);
 }
 ```
 
-Four independent headers, each usable on its own:
+Six independent headers, each usable on its own:
 
 - `charger_monitor.hpp` — state machine, session ledger, tariff
 - `charger_portfolio.hpp` — fleet rollup
 - `charger_ledger.hpp` — durable journal, recovery, verification
 - `charger_config.hpp` — versioned JSON configuration
+- `charger_dbc.hpp` — vendor CAN database reader feeding the protocol profile
+- `charger_tou.hpp` — time-of-use tariff windows, exact integers
+
+## Session lifecycle and the billing gate
+
+<p align="center">
+  <img src="docs/session-lifecycle.png" alt="Session state machine and the conditions that must all hold for billing_complete" width="880">
+</p>
 
 ## The billing contract
 
@@ -145,6 +192,28 @@ Pricing follows an OCPI 2.2.1 subset: `ENERGY`, `TIME` and `FLAT`, with
 connector occupancy while not charging, and inventing it would produce wrong
 invoices.
 
+### What the journal proves, and what it does not
+
+The hash chain proves **internal consistency**: no line was edited, inserted,
+reordered or deleted without breaking the chain, and a third party can recompute
+every link with `cut` and `sha256sum` alone.
+
+It does **not** prove authenticity. The chain is anchored to a public genesis
+constant, so anyone who can rewrite the whole file can recompute it from scratch
+and it will verify. Detecting that requires an external anchor this project does
+not have. Treat the journal as tamper-*evident* evidence of its own history, and
+publish `close_hash` (or the whole-file digest) somewhere append-only if the
+dispute risk demands more.
+
+## What the operator sees
+
+<p align="center">
+  <img src="docs/fleet-kpi.png" alt="Per-bay quality, billable-or-held decision, energy and cost, with the site rollup" width="880">
+</p>
+
+A held session is neither silently dropped nor silently invoiced: it stays
+visible with the reason it was held, which is what a settlement dispute turns on.
+
 ## Deployment
 
 ```bash
@@ -160,6 +229,7 @@ on stderr, and a broken chain is surfaced instead of being ignored.
 
 ## Documentation
 
+- [docs/FIELD_GUIDE.md](docs/FIELD_GUIDE.md) — field guide for engineers and technicians: commissioning, acceptance test, dispute SOP, external anchoring, TOU (in Italian)
 - [charger_project/README.md](charger_project/README.md) — CLI reference, demo protocol, diagnostics, schema fields
 - [docs/INTEROP.md](docs/INTEROP.md) — field-by-field mapping to OCPP 2.0.1 and OCPI 2.2.1
 - [CONTRIBUTING.md](CONTRIBUTING.md) — the five ground rules and the pre-merge checks
@@ -185,6 +255,9 @@ zero-dependency property is not on the list.
 - [x] Predictive diagnostics
 - [x] Versioned JSON configuration
 - [x] Consumable CMake package
+- [x] File-based TOU tariff with coverage validation and strict settlement refusal on holes
+- [x] External journal anchor proving the prefix was not rewritten while the journal grows
+- [x] OCPI CDR subset exporter for the backend
 - [ ] An optional OCPP 2.0.1 client behind a compile-time flag
 - [ ] Multi-bay aggregation from a single journal process
 - [ ] IEC 61851 / CCS signal decoding as a protocol profile

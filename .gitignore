@@ -22,6 +22,9 @@ compile_commands.json
 *.swp
 *~
 
+# Tooling artefacts from external agents
+.freebuff/
+
 # OS noise
 .DS_Store
 Thumbs.db
