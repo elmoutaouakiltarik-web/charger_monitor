@@ -1,7 +1,9 @@
 #include "charger_config.hpp"
+#include "charger_dbc.hpp"
 #include "charger_ledger.hpp"
 #include "charger_monitor.hpp"
 #include "charger_portfolio.hpp"
+#include "charger_tou.hpp"
 
 #include <atomic>
 #include <csignal>
@@ -63,7 +65,13 @@ struct Options {
     std::string journal;
     std::string portfolio_from;
     std::string config_file;
+    std::string dbc_file;
+    bool dump_dbc{false};
+    bool print_tou{false};
     bool verify_journal{false};
+    bool anchor_journal{false};
+    bool verify_anchor{false};
+    std::string anchor_file;
     bool print_config{false};
     std::optional<std::string> stuck_at_s;
     std::optional<std::string> max_v_rate;
@@ -71,6 +79,11 @@ struct Options {
     std::optional<std::string> sag_v;
     std::optional<std::string> sag_tol;
     std::optional<std::string> hunt_band;
+    // OEM DBC adoption path.
+    std::optional<std::string> dbc_path;
+    std::optional<std::string> dbc_voltage_signal;
+    std::optional<std::string> dbc_current_signal;
+    std::optional<std::string> dbc_status_signal;
 };
 
 void usage(const char* argv0) {
@@ -92,14 +105,25 @@ void usage(const char* argv0) {
               << "  --journal PATH         durable hash-chained journal, survives a crash\n"
               << "  --session-log PATH     append-only JSONL of closed sessions\n"
               << "  --verify-journal --journal PATH   verify chain integrity (exit 3 if altered)\n"
+              << "  --anchor-journal --journal PATH --anchor-file PATH   pin the prefix into an external anchor file\n"
+              << "  --verify-anchor --journal PATH --anchor-file PATH    prove the anchored prefix was not rewritten\n"
               << "  --portfolio PATH       site rollup across assets, rebuilt from a journal\n"
               << "  --replay-interval-ms N in --replay, advance time by N ms per line (default 0)\n"
               << "\nConfiguration\n"
               << "  --config PATH          versioned JSON configuration; CLI flags override it\n"
+              << "  --dbc PATH             vendor DBC database to validate the config against\n"
+              << "  --dump-dbc --dbc PATH  print a parsed vendor database\n"
               << "  --print-config         print a configuration example\n"
+              << "  --print-tou            print a TOU tariff file example (charger.tou.v1)\n"
               << "  --asset-id ID          asset identity in the ledger (default demo-bay-1)\n"
               << "  --currency EUR         ISO-4217 label only (default EUR)\n"
               << "  --max-integration-ms   longest integratable sample interval (default 2000, max 3600000)\n"
+              << "\nVendor DBC adoption (decode the OEM wire format, not the demo one)\n"
+              << "  --dbc PATH             vendor DBC database; validated against the config\n"
+              << "  --voltage-signal NAME  explicit voltage signal, rewires the decode from the DBC\n"
+              << "  --current-signal NAME  explicit current signal, rewires the decode from the DBC\n"
+              << "  --status-signal NAME   explicit power-stage status carrier (default: auto-match)\n"
+              << "  --dump-dbc --dbc PATH  print a parsed vendor database\n"
               << "\nPredictive diagnostics (disabled unless thresholds are given)\n"
               << "  --stuck-at-s S         frozen measurement window under load\n"
               << "  --max-v-rate MV/s      maximum plausible voltage slope\n"
@@ -116,6 +140,14 @@ void usage(const char* argv0) {
 bool take_value(int& i, int argc, char** argv, std::string& out) {
     if (i + 1 >= argc) return false;
     out = argv[++i];
+    return true;
+}
+
+// Overload for optional values, so a flag that is "maybe present" is read
+// without a temporary at every call site.
+bool take_value(int& i, int argc, char** argv, std::optional<std::string>& out) {
+    if (i + 1 >= argc) return false;
+    out = std::string(argv[++i]);
     return true;
 }
 
@@ -251,13 +283,46 @@ std::optional<Options> parse_args(int argc, char** argv, std::string& error) {
                 error = ": missing value for --portfolio";
                 return std::nullopt;
             }
+        } else if (a == "--dump-dbc") {
+            opt.dump_dbc = true;
+        } else if (a == "--dbc") {
+            if (!take_value(i, argc, argv, opt.dbc_file)) {
+                error = ": missing value for --dbc";
+                return std::nullopt;
+            }
+        } else if (a == "--voltage-signal") {
+            if (!take_value(i, argc, argv, opt.dbc_voltage_signal)) {
+                error = ": missing value for --voltage-signal";
+                return std::nullopt;
+            }
+        } else if (a == "--current-signal") {
+            if (!take_value(i, argc, argv, opt.dbc_current_signal)) {
+                error = ": missing value for --current-signal";
+                return std::nullopt;
+            }
+        } else if (a == "--status-signal") {
+            if (!take_value(i, argc, argv, opt.dbc_status_signal)) {
+                error = ": missing value for --status-signal";
+                return std::nullopt;
+            }
         } else if (a == "--verify-journal") {
             opt.verify_journal = true;
+        } else if (a == "--anchor-journal") {
+            opt.anchor_journal = true;
+        } else if (a == "--verify-anchor") {
+            opt.verify_anchor = true;
+        } else if (a == "--anchor-file") {
+            if (!take_value(i, argc, argv, opt.anchor_file)) {
+                error = ": missing value for --anchor-file";
+                return std::nullopt;
+            }
         } else if (a == "--config") {
             if (!take_value(i, argc, argv, opt.config_file)) {
                 error = ": missing value for --config";
                 return std::nullopt;
             }
+        } else if (a == "--print-tou") {
+            opt.print_tou = true;
         } else if (a == "--print-config") {
             opt.print_config = true;
         } else if (a == "--stuck-at-s") {
@@ -303,10 +368,13 @@ std::optional<Options> parse_args(int argc, char** argv, std::string& error) {
             return std::nullopt;
         }
     }
-    const bool is_action = !opt.portfolio_from.empty() || opt.verify_journal || opt.print_config;
+    const bool is_action = !opt.portfolio_from.empty() || opt.verify_journal || opt.print_config || opt.dump_dbc ||
+                           opt.anchor_journal || opt.verify_anchor || opt.print_tou;
     if (is_action) {
         if (opt.simulate || opt.replay || !opt.iface.empty() || opt.help || opt.version) {
-            error = "--portfolio and --verify-journal are standalone actions: do not combine with a listening mode";
+            error =
+                "--portfolio, --verify-journal, --anchor-journal and --verify-anchor are standalone actions: do not "
+                "combine with a listening mode";
             return std::nullopt;
         }
         return opt;
@@ -334,6 +402,15 @@ std::int64_t require_milli(const std::string& text, const char* flag) {
 
 charger::Config make_config(const Options& opt) {
     charger::Config cfg;
+    std::string dbc_text;
+    const bool explicit_signals = opt.dbc_voltage_signal.has_value() && opt.dbc_current_signal.has_value();
+    if (!opt.dbc_file.empty()) {
+        std::ifstream dbc(opt.dbc_file, std::ios::binary);
+        if (!dbc) throw std::runtime_error("Cannot open the DBC file: " + opt.dbc_file);
+        std::ostringstream db;
+        db << dbc.rdbuf();
+        dbc_text = db.str();
+    }
     // The file is the base; explicit flags override it, so an operator can fix
     // one value on a running fleet without editing every file.
     if (!opt.config_file.empty()) {
@@ -341,13 +418,51 @@ charger::Config make_config(const Options& opt) {
         if (!in) throw std::runtime_error("Cannot open the configuration: " + opt.config_file);
         std::ostringstream buf;
         buf << in.rdbuf();
-        const auto loaded = charger::parse_config(buf.str());
+        const auto loaded = charger::parse_config(buf.str(), dbc_text);
         if (!loaded.ok) {
             std::string msg = "Invalid configuration in " + opt.config_file + ":";
             for (const auto& e : loaded.errors) msg += "\n  " + e.field + ": " + e.message;
             throw std::runtime_error(msg);
         }
         cfg = loaded.config;
+    } else if (!dbc_text.empty() && !explicit_signals) {
+        throw std::runtime_error("--dbc requires --config, or both --voltage-signal and --current-signal");
+    }
+    if (explicit_signals) {
+        // Adoption path: the operator names the signals, the DBC supplies the
+        // wire layout. Every mapping is validated exactly; anything the codec
+        // cannot decode bit-exactly aborts the start instead of guessing.
+        const auto db = charger::parse_dbc(dbc_text);
+        if (!db.ok) {
+            std::string detail = "cannot parse the vendor database";
+            if (!db.errors.empty()) detail += " at line " + std::to_string(db.errors.front().first);
+            throw std::runtime_error(detail);
+        }
+        charger::DbcBinding binding;
+        std::string bind_err;
+        if (explicit_signals &&
+            !charger::bind_signals(db.database, *opt.dbc_voltage_signal, *opt.dbc_current_signal, binding, bind_err)) {
+            throw std::runtime_error(bind_err);
+        }
+        if (opt.dbc_status_signal) {
+            binding.status_signal = *opt.dbc_status_signal;
+            binding.status_id = 0;  // resolved by the signal name
+        } else if (const auto st = charger::auto_bind_status(db.database)) {
+            binding.status_id = st->can_id;
+            binding.status_signal = st->signal;
+        }
+        const auto profile = charger::profile_from_dbc(db.database, binding);
+        if (!profile.ok) throw std::runtime_error(profile.error);
+        if (!profile.status_bound) {
+            const auto& p = profile.profile;
+            if (p.status_id == p.measurement_id) {
+                throw std::runtime_error(
+                    "no DBC status carrier could be bound; the default status id "
+                    "0x181 collides with the measurement id. Pass --status-signal "
+                    "or set status_id in the config");
+            }
+        }
+        cfg.protocol = profile.profile;
     }
     if (!opt.asset_id.empty()) cfg.asset_id = opt.asset_id;
     if (!opt.currency.empty()) cfg.currency = opt.currency;
@@ -388,8 +503,8 @@ class SessionLog {
             if (!led) throw std::runtime_error(err);
             const auto rep = led->recover();
             if (!rep.chain_intact) {
-                std::cerr << "ATTENZIONE: ledger con catena interrotta alla riga " << rep.first_broken_line
-                          << "; le righe successive non sono attendibili\n";
+                std::cerr << "WARNING: ledger chain broken at line " << rep.first_broken_line
+                          << "; data beyond that point is not trustworthy\n";
             }
             for (const auto& orphan : rep.orphan_sessions) {
                 std::cerr << "ORPHAN_SESSION asset=" << orphan.first << " id=" << orphan.second
@@ -419,15 +534,19 @@ class SessionLog {
             ledger_.append_session_open(*snap.session, snap.asset_id, charger::utc_timestamp());
         }
         if (!closed) return;
+        // The tariff of record travels with the session so a dispute can be
+        // verified years later, even when the running configuration changed.
+        const std::string tariff = charger::json_tariff_block(monitor.config().tariff);
         if (journal_enabled_ && snap.last_session) {
-            ledger_.append_session_close(*snap.last_session, snap.asset_id, snap.currency, charger::utc_timestamp());
+            ledger_.append_session_close(*snap.last_session, snap.asset_id, snap.currency, charger::utc_timestamp(),
+                                         tariff);
         }
         if (jsonl_enabled_ && snap.last_session) {
             out_ << charger::json_session_line(*snap.last_session, snap.asset_id, snap.currency,
-                                               charger::utc_timestamp())
+                                               charger::utc_timestamp(), tariff)
                  << '\n';
             out_.flush();
-            if (!out_) std::cerr << "SESSION_LOG_FAILED scrittura ledger non riuscita\n";
+            if (!out_) std::cerr << "SESSION_LOG_FAILED\n";
         }
     }
 
@@ -514,7 +633,7 @@ void run_simulation(charger::Monitor& monitor, SessionLog& log) {
 #if defined(__linux__)
 int open_can(const std::string& iface) {
     const int fd = ::socket(PF_CAN, SOCK_RAW, CAN_RAW);
-    if (fd < 0) throw std::runtime_error(std::string("socket CAN fallito: ") + std::strerror(errno));
+    if (fd < 0) throw std::runtime_error(std::string("socket(3) failed: ") + std::strerror(errno));
     ifreq ifr{};
     std::strncpy(ifr.ifr_name, iface.c_str(), IFNAMSIZ - 1);
     if (::ioctl(fd, SIOCGIFINDEX, &ifr) < 0) {
@@ -528,7 +647,7 @@ int open_can(const std::string& iface) {
     if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         const auto e = errno;
         ::close(fd);
-        throw std::runtime_error(std::string("bind CAN fallito: ") + std::strerror(e));
+        throw std::runtime_error(std::string("bind(2) failed: ") + std::strerror(e));
     }
     return fd;
 }
@@ -544,7 +663,7 @@ void run_can(charger::Monitor& monitor, const std::string& iface, SessionLog& lo
             if (errno == EINTR) continue;
             const auto e = errno;
             ::close(fd);
-            throw std::runtime_error(std::string("poll fallito: ") + std::strerror(e));
+            throw std::runtime_error(std::string("poll(2) failed: ") + std::strerror(e));
         }
         if (pr == 0) {
             const auto now = charger::Clock::now();
@@ -555,7 +674,7 @@ void run_can(charger::Monitor& monitor, const std::string& iface, SessionLog& lo
         }
         if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
             ::close(fd);
-            throw std::runtime_error("Errore sul descrittore CAN");
+            throw std::runtime_error("CAN descriptor error");
         }
         if (!(pfd.revents & POLLIN)) continue;
         can_frame raw{};
@@ -564,10 +683,10 @@ void run_can(charger::Monitor& monitor, const std::string& iface, SessionLog& lo
             if (errno == EINTR || errno == EAGAIN) continue;
             const auto e = errno;
             ::close(fd);
-            throw std::runtime_error(std::string("read CAN fallita: ") + std::strerror(e));
+            throw std::runtime_error(std::string("read(2) failed: ") + std::strerror(e));
         }
         if (n != static_cast<ssize_t>(sizeof(raw))) {
-            log_event({charger::EventLevel::Warning, "CAN_FRAME_SIZE", "Dimensione frame ricevuto inattesa"});
+            log_event({charger::EventLevel::Warning, "CAN_FRAME_SIZE", "Unexpected received frame size"});
             continue;
         }
         if ((raw.can_id & CAN_ERR_FLAG) != 0) {
@@ -584,7 +703,7 @@ void run_can(charger::Monitor& monitor, const std::string& iface, SessionLog& lo
         f.length = raw.can_dlc;
         f.received_at = charger::Clock::now();
         if (f.length > 8) {
-            log_event({charger::EventLevel::Warning, "CAN_DLC_INVALID", "DLC fuori intervallo"});
+            log_event({charger::EventLevel::Warning, "CAN_DLC_INVALID", "DLC out of range"});
             continue;
         }
         for (std::size_t i = 0; i < f.length; ++i) f.data[i] = raw.data[i];
@@ -605,16 +724,48 @@ void run_portfolio(const std::string& path) {
     }
     const auto rep = led->recover();
     if (!rep.chain_intact) {
-        std::cerr << "ATTENZIONE: ledger chain broken at line " << rep.first_broken_line
+        std::cerr << "WARNING: ledger chain broken at line " << rep.first_broken_line
                   << ". Data beyond that point is not trustworthy.\n";
         return;
     }
     const auto kpi = led->portfolio();
     if (!kpi) {
-        std::cout << "{\"schema\":\"charger.portfolio.v1\",\"assets\":0,\"note\":\"ledger vuoto\"}\n";
+        std::cout << "{\"schema\":\"charger.portfolio.v1\",\"assets\":0,\"note\":\"empty ledger\"}\n";
         return;
     }
     std::cout << charger::json_portfolio(*kpi) << '\n';
+}
+
+int run_anchor_journal(const std::string& journal, const std::string& anchor) {
+    if (journal.empty() || anchor.empty()) {
+        std::cerr << "FATAL: --anchor-journal requires --journal PATH and --anchor-file PATH\n";
+        return 2;
+    }
+    charger::JournalAnchor out;
+    std::string err;
+    if (!charger::write_journal_anchor(journal, anchor, out, err)) {
+        std::cerr << "FATAL: " << err << '\n';
+        return 1;
+    }
+    std::cout << "ANCHORED: " << out.lines << " lines, last_hash " << out.last_hash << " at " << out.anchored_at_utc
+              << "\n  store " << anchor
+              << " on append-only storage (WORM share, object-lock bucket); the journal may keep growing\n";
+    return 0;
+}
+
+int run_verify_anchor(const std::string& journal, const std::string& anchor) {
+    if (journal.empty() || anchor.empty()) {
+        std::cerr << "FATAL: --verify-anchor requires --journal PATH and --anchor-file PATH\n";
+        return 2;
+    }
+    std::uint64_t appended = 0;
+    std::string err;
+    if (!charger::verify_journal_anchor(journal, anchor, appended, err)) {
+        std::cerr << "ANCHOR MISMATCH: " << err << '\n';
+        return 3;
+    }
+    std::cout << "ANCHOR VERIFIED: prefix intact, " << appended << " line(s) appended since the anchor\n";
+    return 0;
 }
 
 int run_verify_journal(const std::string& path) {
@@ -658,6 +809,25 @@ int main(int argc, char** argv) {
         std::cout << charger::json_config_example();
         return 0;
     }
+    if (parsed->print_tou) {
+        std::cout << charger::json_tou_example();
+        return 0;
+    }
+    if (parsed->dump_dbc) {
+        if (parsed->dbc_file.empty()) {
+            std::cerr << "FATAL: --dump-dbc requires --dbc PATH\n";
+            return 2;
+        }
+        std::ifstream dbc(parsed->dbc_file, std::ios::binary);
+        if (!dbc) {
+            std::cerr << "FATAL: cannot open " << parsed->dbc_file << '\n';
+            return 2;
+        }
+        std::ostringstream buf;
+        buf << dbc.rdbuf();
+        std::cout << charger::describe_dbc(buf.str());
+        return 0;
+    }
     if (!parsed->portfolio_from.empty()) {
         run_portfolio(parsed->portfolio_from);
         return 0;
@@ -668,6 +838,12 @@ int main(int argc, char** argv) {
             return 2;
         }
         return run_verify_journal(parsed->journal);
+    }
+    if (parsed->anchor_journal) {
+        return run_anchor_journal(parsed->journal, parsed->anchor_file);
+    }
+    if (parsed->verify_anchor) {
+        return run_verify_anchor(parsed->journal, parsed->anchor_file);
     }
     try {
         auto config = make_config(*parsed);

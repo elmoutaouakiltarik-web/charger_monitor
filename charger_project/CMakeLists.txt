@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(charger_monitor_demo VERSION 1.3.0 LANGUAGES CXX)
+project(charger_monitor_demo VERSION 1.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -28,28 +28,36 @@ add_library(charger_core
     src/charger_portfolio.cpp
     src/charger_ledger.cpp
     src/charger_config.cpp
+    src/charger_dbc.cpp
+    src/charger_tou.cpp
 )
 target_include_directories(charger_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_compile_options(charger_core PRIVATE -Wall -Wextra -Wpedantic ${SANFLAGS})
-target_link_options(charger_core PRIVATE ${SANLINK})
+# Static GCC runtime: an industrial host has exactly one DBC file and zero
+# appetite for a wrong libstdc++ DLL on PATH deciding whether the journal
+# survives. MinGW ships a mismatched libstdc++-6.dll in unexpected places.
+target_link_options(charger_core PRIVATE ${SANLINK} -static-libgcc -static-libstdc++)
 # Export as charger::core so downstream projects link a readable name.
 set_target_properties(charger_core PROPERTIES EXPORT_NAME core)
 
 add_executable(charger_monitor src/main.cpp)
 target_link_libraries(charger_monitor PRIVATE charger_core)
 target_compile_options(charger_monitor PRIVATE -Wall -Wextra -Wpedantic ${SANFLAGS})
-target_link_options(charger_monitor PRIVATE ${SANLINK})
+target_link_options(charger_monitor PRIVATE ${SANLINK} -static-libgcc -static-libstdc++)
 target_compile_definitions(charger_monitor PRIVATE CHARGER_VERSION="${PROJECT_VERSION}")
 
 if(CHARGER_BUILD_TESTS)
     add_executable(charger_tests tests/test_state_machine.cpp)
     target_link_libraries(charger_tests PRIVATE charger_core)
     target_compile_options(charger_tests PRIVATE -Wall -Wextra -Wpedantic ${SANFLAGS})
-    target_link_options(charger_tests PRIVATE ${SANLINK})
+    target_link_options(charger_tests PRIVATE ${SANLINK} -static-libgcc -static-libstdc++)
     target_compile_definitions(charger_tests PRIVATE CHARGER_VERSION="${PROJECT_VERSION}")
     add_test(NAME charger_state_machine COMMAND charger_tests)
+    # The test reads tests/fixtures/vendor_bay.dbc, so pin the working directory.
+    set_tests_properties(charger_state_machine PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 if(CHARGER_BUILD_TOOLS)
@@ -59,7 +67,7 @@ if(CHARGER_BUILD_TOOLS)
         add_executable(${tool} tools/${tool}/main.cpp)
         target_link_libraries(${tool} PRIVATE charger_core)
         target_compile_options(${tool} PRIVATE -Wall -Wextra -Wpedantic ${SANFLAGS})
-        target_link_options(${tool} PRIVATE ${SANLINK})
+        target_link_options(${tool} PRIVATE ${SANLINK} -static-libgcc -static-libstdc++)
     endforeach()
 
     # The demo and the settlement tool must be reproducible in CI: they assert
@@ -83,7 +91,7 @@ install(TARGETS charger_core
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(TARGETS charger_monitor RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES include/charger_monitor.hpp include/charger_portfolio.hpp include/charger_ledger.hpp
-        include/charger_config.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+        include/charger_config.hpp include/charger_dbc.hpp include/charger_tou.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 # Downstream projects consume the library with find_package(charger_monitor).
 install(EXPORT chargerTargets

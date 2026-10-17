@@ -1,0 +1,31 @@
+// Vendor-style DBC used as a decode oracle fixture.
+//
+// Every value here was cross-checked against cantools 45.x, the de-facto
+// reference implementation. The layout deliberately exercises the hard cases:
+// Motorola (big-endian) signalling at byte-aligned and offset positions, a
+// signed signal with a negative offset, and an enumerated status table.
+
+VERSION "vendor-example-1.2"
+
+NS_ :
+
+BS_:
+
+BU_: ChargerBMS Inverter Gateway
+
+BO_ 768 ChgData: 8 ChargerBMS
+ SG_ DC_Voltage : 7|16@0+ (0.01,0) [0|1000] "V" Gateway
+ SG_ DC_Current : 23|16@0+ (0.01,0) [0|500] "A" Gateway
+ SG_ Pack_SOC : 48|8@1+ (1,0) [0|100] "%" Gateway
+ SG_ Amb_Temp : 56|8@1- (0.5,-40) [-40|87] "degC" Gateway
+
+BO_ 769 PowerStage: 1 Inverter
+ SG_ Stage_Status : 0|8@1+ (1,0) [0|3] "" Gateway
+
+BO_ 2147485824 ExtendedDiag: 4 Inverter
+ SG_ Fault_Class : 0|4@0+ (1,0) [0|15] "" Gateway
+
+CM_ BO_ 768 "DC link measurements at 10 Hz";
+CM_ SG_ 768 DC_Voltage "Measured at the inverter bridge";
+
+VAL_ 769 Stage_Status 0 "Off" 1 "Ready" 2 "Charging" 3 "Fault" ;

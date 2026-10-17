@@ -78,6 +78,10 @@ std::uint64_t ceil_step_u64(std::uint64_t consumed, std::int32_t step) {
     const auto s = static_cast<std::uint64_t>(step);
     const auto rem = consumed % s;
     if (rem == 0) return consumed;
+    const auto headroom = std::numeric_limits<std::uint64_t>::max() - consumed;
+    // Saturate rather than wrap: a rounded billable register must never become
+    // a small number, which would silently under-invoice.
+    if (headroom < s - rem) return std::numeric_limits<std::uint64_t>::max();
     return consumed + (s - rem);
 }
 
@@ -86,6 +90,8 @@ std::int64_t ceil_step_i64(std::int64_t consumed, std::int32_t step) {
     const auto s = static_cast<std::int64_t>(step);
     const auto rem = consumed % s;
     if (rem == 0) return consumed;
+    const auto headroom = std::numeric_limits<std::int64_t>::max() - consumed;
+    if (headroom < s - rem) return std::numeric_limits<std::int64_t>::max();
     return consumed + (s - rem);
 }
 
@@ -310,11 +316,23 @@ void Monitor::price(SessionRecord& rec) const {
     rec.energy_lower_bound = rec.undersampled || rec.integration_gaps > 0 || rec.time_upper_bound;
     rec.billing_complete = rec.closed && rec.quality == "OK" && !rec.time_upper_bound;
 
+    // The overflow guard must precede the narrowing cast: converting a uint64_t
+    // above INT64_MAX to int64_t is implementation-defined and can wrap to a
+    // positive value, which would then slip past mul_div_round's negative check.
+    const auto energy_limit = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+    if (rec.billed_energy_wh > energy_limit) {
+        rec.energy_cost_micro_eur = 0;
+        rec.time_cost_micro_eur = 0;
+        rec.flat_cost_micro_eur = 0;
+        rec.total_cost_micro_eur = 0;
+        rec.billing_complete = false;
+        rec.quality = "PRICE_OVERFLOW";
+        return;
+    }
     const auto energy =
         mul_div_round(static_cast<std::int64_t>(rec.billed_energy_wh), config_.tariff.energy_micro_eur_per_kwh, 1000);
     const auto time = mul_div_round(rec.billed_time_s, config_.tariff.time_micro_eur_per_hour, 3600);
-    if (!energy || !time ||
-        rec.billed_energy_wh > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+    if (!energy || !time) {
         rec.energy_cost_micro_eur = 0;
         rec.time_cost_micro_eur = 0;
         rec.flat_cost_micro_eur = 0;
@@ -839,20 +857,21 @@ std::string to_string(EventLevel l) {
 }
 
 const char* recommended_action(const std::string& code) noexcept {
-    if (code == "MEASUREMENT_OUT_OF_RANGE") return "Verificare scala, sensore e limiti; non resettare da remoto";
-    if (code == "POWER_STAGE_FAULT") return "Isolare la baia e seguire la procedura guasto del costruttore";
-    if (code == "ENERGY_COUNTER_SATURATED") return "Chiudere il turno di conteggio e archiviare il ledger";
+    if (code == "MEASUREMENT_OUT_OF_RANGE")
+        return "Check the scaling, the sensor and the limits; do not reset remotely";
+    if (code == "POWER_STAGE_FAULT") return "Isolate the bay and follow the manufacturer's fault procedure";
+    if (code == "ENERGY_COUNTER_SATURATED") return "Close the counting shift and archive the ledger";
     if (code == "MEASUREMENTS_TIMEOUT" || code == "POWER_STATUS_TIMEOUT")
-        return "Controllare bus, terminazione, connettore e gateway";
-    if (code == "CAN_ID_UNKNOWN") return "Il profilo protocollo non corrisponde a questo asset";
-    if (code == "CLOCK_REGRESSION") return "Controllare la sorgente di tempo del replay o del gateway";
+        return "Check the bus, the termination, the connector and the gateway";
+    if (code == "CAN_ID_UNKNOWN") return "The protocol profile does not match this asset";
+    if (code == "CLOCK_REGRESSION") return "Check the time source of the replay or of the gateway";
     if (code == "MEASUREMENT_GAP") return "Do not bill the missing interval; raise the step only with evidence";
     if (code == "SESSION_CLOSED") return "Invoice automatically only when billing_complete is true";
-    if (code == "MEASUREMENT_STUCK") return "Verificare sensore e cablaggio del canale misure";
+    if (code == "MEASUREMENT_STUCK") return "Check the measurement channel's sensor and wiring";
     if (code == "VOLTAGE_RATE_EXCEEDED" || code == "CURRENT_RATE_EXCEEDED")
-        return "Controllare transitori e prelievi anomali sulla linea";
-    if (code == "VOLTAGE_SAG_UNDER_LOAD") return "Ispezionare connettore, fusibili e contattore";
-    if (code == "CURRENT_HUNTING") return "Verificare serraggio e resistenza di contatto";
+        return "Check transients and abnormal line loading";
+    if (code == "VOLTAGE_SAG_UNDER_LOAD") return "Inspect the connector, the fuses and the contactor";
+    if (code == "CURRENT_HUNTING") return "Check the terminal tightness and the contact resistance";
     return "";
 }
 
@@ -902,14 +921,28 @@ std::string json_snapshot(const Snapshot& s) {
     return o.str();
 }
 
+std::string json_tariff_block(const Tariff& t) {
+    std::ostringstream o;
+    o << "{\"schema\":\"charger.tariff.v1\",\"model\":\"ocpi-2.2.1-energy-time-flat\",\"vat\":\"omitted\""
+         ",\"energy_micro_eur_per_kwh\":\""
+      << t.energy_micro_eur_per_kwh << "\",\"time_micro_eur_per_hour\":\"" << t.time_micro_eur_per_hour
+      << "\",\"flat_micro_eur\":\"" << t.flat_micro_eur << "\",\"energy_step_wh\":" << t.energy_step_wh
+      << ",\"time_step_s\":" << t.time_step_s;
+    if (t.min_price_micro_eur) o << ",\"min_price_micro_eur\":\"" << *t.min_price_micro_eur << '"';
+    if (t.max_price_micro_eur) o << ",\"max_price_micro_eur\":\"" << *t.max_price_micro_eur << '"';
+    o << "}";
+    return o.str();
+}
+
 std::string json_session_line(const SessionRecord& rec, const std::string& asset_id, const std::string& currency,
-                              const std::string& closed_at_utc) {
+                              const std::string& closed_at_utc, const std::string& tariff_json) {
     std::ostringstream o;
     o << "{\"schema\":\"" << SESSION_SCHEMA << "\",\"version\":\"" << VERSION << "\",\"asset_id\":\""
       << json_escape(asset_id) << "\",\"currency\":\"" << json_escape(currency) << "\",\"closed_at_utc\":\""
       << json_escape(closed_at_utc)
       << "\",\"price_model\":\"ocpi-2.2.1-energy-time-flat\",\"vat\":\"omitted\",\"session\":";
     append_record(o, rec);
+    if (!tariff_json.empty()) o << ",\"tariff\":" << tariff_json;
     o << "}";
     return o.str();
 }

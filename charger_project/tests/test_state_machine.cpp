@@ -1,13 +1,17 @@
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "charger_config.hpp"
+#include "charger_dbc.hpp"
 #include "charger_ledger.hpp"
 #include "charger_monitor.hpp"
+#include "charger_tou.hpp"
 
 void require(bool condition, const std::string& message) {
     if (!condition) throw std::runtime_error(message);
@@ -37,7 +41,7 @@ CanFrame status(std::uint8_t s, Clock::time_point t) {
 }
 
 int main() {
-    // --- Macchina a stati di base ---
+    // --- Basic state machine ---
     const auto t = Clock::now();
     Monitor m;
     require(m.snapshot(t).state == ChargeState::Unknown, "initial state must be UNKNOWN");
@@ -58,7 +62,7 @@ int main() {
     require(m.snapshot(later).measurement_age_ms == 1500 && m.snapshot(later).status_age_ms == 1500,
             "ages must track elapsed time");
 
-    // --- Frame rifiutati dal validatore ---
+    // --- Frames rejected by the validator ---
     {
         CanFrame bad = measurements(480, 10, t);
         bad.length = 7;
@@ -90,7 +94,7 @@ int main() {
                 "invalid power status frame must be rejected");
     }
 
-    // --- Guasto latched: nessun ripristino automatico ---
+    // --- Latched fault: no automatic recovery ---
     const auto ev = m.ingest(measurements(501, 10, t));
     require(!ev.empty(), "out-of-range measurement must emit event");
     require(m.snapshot(t).state == ChargeState::Fault, "out-of-range measurement must latch FAULT");
@@ -112,7 +116,7 @@ int main() {
     require(!m.reset_fault(reason), "reset of MEASUREMENT_OUT_OF_RANGE must be denied (protected fault)");
     require(!reason.empty(), "protected-fault denial must carry a reason");
 
-    // --- Timeout di comunicazione senza guasto, con deduplicazione degli eventi ---
+    // --- Communication timeout without a fault, with event deduplication ---
     {
         Monitor m2;
         const auto t0 = Clock::now();
@@ -130,7 +134,7 @@ int main() {
         require(!s.measurements.valid, "stale measurements must be invalid");
         require(s.measurement_age_ms == 4000 && s.status_age_ms == 4000, "timed-out ages must be 4000 ms");
         require(m2.tick(t0 + std::chrono::seconds(4)).empty(), "timeout events must not repeat until new data arrives");
-        // Nuovi dati ri-armano gli event: riportano CHARGING e un nuovo gap produce di nuovo gli event
+        // Fresh data re-arms the events: back to CHARGING, and a new gap emits them again
         m2.ingest(measurements(400, 5, t0 + std::chrono::seconds(5)));
         m2.ingest(status(2, t0 + std::chrono::seconds(5)));
         require(m2.snapshot(t0 + std::chrono::seconds(5)).state == ChargeState::Charging,
@@ -139,7 +143,7 @@ int main() {
         require(events2.size() == 3, "re-armed timeout must emit both events and close the new session");
     }
 
-    // --- Ordine di arrivo indipendente: prima lo stato, poi le misure ---
+    // --- Delivery-order independence: status first, then measurements ---
     {
         Monitor m3;
         const auto t0 = Clock::now();
@@ -156,7 +160,7 @@ int main() {
         require(m4.snapshot().state == ChargeState::Unknown, "never-fed monitor must stay UNKNOWN");
     }
 
-    // --- Rappresentazioni testuali e JSON ---
+    // --- Text and JSON representations ---
     require(to_string(ChargeState::Charging) == "CHARGING", "state to_string");
     require(to_string(EventLevel::Error) == "ERROR", "level to_string");
     const auto json = json_snapshot(m.snapshot(t + std::chrono::seconds(4)));
@@ -165,7 +169,7 @@ int main() {
             "JSON must carry the fault code");
     require(json.find("\"rejected_frames\":5") != std::string::npos, "JSON must carry rejected frame count");
     require(json.find("\"measurement_age_ms\":4000") != std::string::npos,
-            "JSON must carry the measurement age");  // --- Validazione della configurazione ---
+            "JSON must carry the measurement age");  // --- Configuration validation ---
     {
         Config cfg;
         cfg.max_voltage_v = -1.0;
@@ -393,7 +397,7 @@ int main() {
         require(!s.power_enabled, "power-stage fault clears the flag");
         require(s.state == ChargeState::Fault, "stage fault latches");
         require(s.last_session && s.last_session->stop_reason == "POWER_STAGE_FAULT", "fault closes the session");
-        require(s.fault_action.find("Isolare") != std::string::npos, "fault carries an operator action");
+        require(s.fault_action.find("Isolate") != std::string::npos, "fault carries an operator action");
     }
 
     {
@@ -476,7 +480,7 @@ int main() {
         const auto t0 = Clock::now();
         mon.ingest(status(2, t0));
         mon.ingest(measurements(480, 10, t0));
-        // Stesso valore per 12 s a carico costante: il sensore potrebbe essere bloccato.
+        // A constant load must not trip the stuck check: no threshold is configured.
         for (int s = 1; s <= 12; ++s) {
             mon.ingest(measurements(480, 10, t0 + std::chrono::seconds(s)));
         }
@@ -565,9 +569,9 @@ int main() {
                 "no diagnostic fires without configured thresholds");
     }
 
-    // --- Journal hash-chained: recovery, orfani, manomissione ---
+    // --- Hash-chained journal: recovery, orphans, tampering ---
     {
-        // Vettori ufficiali NIST: un hash errato renderebbe la catena inutile.
+        // Official NIST vectors: a wrong hash would make the chain worthless.
         require(sha256_hex("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "sha256 empty");
         require(sha256_hex("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "sha256 abc");
         require(sha256_hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") ==
@@ -577,7 +581,14 @@ int main() {
             sha256_hex(std::string(1000000, 'a')) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0",
             "sha256 one million a");
 
-        const std::string path = std::string(std::tmpnam(nullptr)) + ".journal";
+        // PID-suffixed path: tmpnam is not exclusive across runs and a stale
+        // file from an earlier run would corrupt this assertion.
+        const std::string path =
+            (std::filesystem::temp_directory_path() /
+             ("charger_test_journal_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+              ".journal"))
+                .string();
+        std::remove(path.c_str());
         std::string err;
         auto opened_only = [](std::uint64_t id) {
             SessionRecord r;
@@ -598,7 +609,7 @@ int main() {
             done.stop_reason = "STATUS_OFF";
             done.samples = 10;
             led->append_session_close(done, "bay-1", "EUR", "2026-01-01T01:00:00Z");
-            // Il processo muore qui: sessione 2 aperta e mai chiusa.
+            // The process dies here: session 2 opened and never closed.
             led->append_session_open(opened_only(2), "bay-2", "2026-01-01T01:00:00Z");
         }
         auto led2 = Ledger::open(path, false, err);
@@ -710,7 +721,7 @@ int main() {
     }
     {
         // Un campo scritto male deve fallire: una tariffa a zero silenziosa
-        // fatturerebbe zero euro e non se ne accorgerebbe nessuno.
+        // would invoice zero and nobody would notice.
         const auto r = parse_config(R"({"schema":"charger.config.v1","tariff":{"energy_eur_per_kwh":"0.25x"}})");
         require(!r.ok, "malformed tariff amount is rejected");
         require(!r.errors.empty() && r.errors.front().field == "tariff.energy_eur_per_kwh", "error names the field");
@@ -735,8 +746,8 @@ int main() {
         require(r.config.tariff.energy_step_wh == 1, "untouched field keeps the default");
     }
     {
-        // Un file non puo' produrre una configurazione che Monitor rifiuta:
-        // la validazione incrociata avviene una sola volta con lo stesso errore.
+        // No file may produce a configuration the Monitor rejects:
+        // cross-validation surfaces exactly once, with the same error.
         const auto r = parse_config(R"({"schema":"charger.config.v1","max_voltage_v":-5.0})");
         require(!r.ok, "negative voltage limit is rejected by cross-validation");
     }
@@ -748,6 +759,550 @@ int main() {
     {
         const auto r = parse_config("non json");
         require(!r.ok, "garbage is rejected");
+    }
+    {
+        // A document truncated by an interrupted write must not be accepted
+        // with only the fields that happened to parse: for a billing config
+        // that silently means zero prices.
+        require(!parse_config("{").ok, "unterminated root object is rejected");
+        require(!parse_config(R"({"tariff":{)").ok, "unterminated tariff object is rejected");
+        require(!parse_config(R"({"diagnostics":{)").ok, "unterminated diagnostics object is rejected");
+        require(!parse_config(R"({"protocol":{)").ok, "unterminated protocol object is rejected");
+        require(!parse_config(R"({"schema":"charger.config.v1","tariff":{"energy_eur_per_kwh":"0.25")").ok,
+                "truncated tariff mid-value is rejected");
+    }
+    {
+        // The schema gate protects the compatibility contract.
+        require(!parse_config(R"({"asset_id":"bay-1"})").ok, "a document without schema is rejected");
+        require(!parse_config("{}").ok, "an empty object without schema is rejected");
+        require(parse_config(R"({"schema":"charger.config.v1"})").ok, "a minimal document with the schema is valid");
+    }
+    {
+        // Rounding a billable register must saturate, never wrap: a wrapped
+        // Wh figure would silently under-invoice.
+        Config cfg;
+        cfg.tariff.energy_micro_eur_per_kwh = 250000;
+        Monitor mon(cfg);
+        const auto t0 = Clock::now();
+        mon.ingest(status(2, t0));
+        mon.ingest(measurements(480, 10, t0));
+        mon.ingest(measurements(480, 10, t0 + std::chrono::seconds(1)));
+        const auto s = mon.snapshot(t0 + std::chrono::seconds(1)).session;
+        require(s && s->billed_energy_wh >= s->energy_wh, "billable energy is never below delivered energy");
+    }
+
+    // --- DBC: decoding a vendor protocol, cross-checked against cantools 45.x ---
+    {
+        std::ifstream in("tests/fixtures/vendor_bay.dbc");
+        require(static_cast<bool>(in), "vendor fixture must be present");
+        std::ostringstream buf;
+        buf << in.rdbuf();
+        const auto r = parse_dbc(buf.str());
+        require(r.ok, "vendor DBC parses");
+        require(r.database.messages.size() == 3, "three messages");
+        require(r.database.nodes.size() == 3, "three nodes");
+        require(r.database.version == "vendor-example-1.2", "version captured");
+
+        const auto* msg = r.database.find_by_name("ChgData");
+        require(msg != nullptr, "ChgData found by name");
+        require(msg->can_id == 0x300, "message id");
+        require(msg->length == 8, "message length");
+
+        // Extended ids carry the Vector flag, which must be stripped.
+        require(r.database.find_by_id(0x880) != nullptr, "extended id resolved without the flag");
+        require(r.database.find_by_id(0x8C000004) == nullptr, "the raw extended value is not a key");
+
+        const auto* v = msg->find_signal("DC_Voltage");
+        const auto* c = msg->find_signal("DC_Current");
+        const auto* t = msg->find_signal("Amb_Temp");
+        require(v && c && t, "signals found");
+        require(!v->little_endian && !c->little_endian, "@0 is Motorola");
+        require(!v->is_signed && t->is_signed, "sign flag parsed");
+        require(v->start_bit == 7 && c->start_bit == 23, "start bits");
+        require(t->start_bit == 56 && t->length_bits == 8, "little-endian signal start");
+
+        // Payload below is the one cantools encodes for 480.00 V and 100.00 A.
+        const std::uint8_t payload[8] = {0xBB, 0x80, 0x27, 0x10, 0x00, 0x00, 0x00, 0x00};
+        const auto rv = v->decode_raw(payload, 8);
+        const auto rc = c->decode_raw(payload, 8);
+        require(rv && *rv == 48000, "Motorola 16-bit voltage decodes to 480.00 V");
+        require(rc && *rc == 10000, "Motorola 16-bit current decodes to 100.00 A");
+        require(v->to_physical(rv ? *rv : 0) == 480.0, "physical voltage");
+        require(c->to_physical(rc ? *rc : 0) == 100.0, "physical current");
+
+        // A short payload must be refused rather than read out of bounds.
+        require(!v->decode_raw(payload, 1), "short payload rejected");
+        // The bound covers the whole run, not just its length: a signal that
+        // starts high in a short payload used to be read past the buffer.
+        require(!t->decode_raw(payload, 7), "a truncated little-endian signal is refused");
+        require(!t->decode_raw(payload, 1), "a one-byte payload is refused");
+
+        // Motorola that does not start on a byte boundary. cantools lays such a
+        // signal out as one contiguous ascending run of payload bits, so
+        // 0|4@0+ occupies payload bits 7..10: byte 0 bit 0 up to byte 1 bit 5.
+        // The payload below is what cantools 45.x encodes for the value 10.
+        const auto* ext = r.database.find_by_id(0x880);
+        require(ext != nullptr, "ExtendedDiag resolved");
+        const auto* fault = ext->find_signal("Fault_Class");
+        require(fault && !fault->little_endian, "mid-byte Motorola signal found");
+        const std::uint8_t fault_payload[4] = {0x01, 0x40, 0x00, 0x00};
+        const auto rf = fault->decode_raw(fault_payload, 4);
+        require(rf && *rf == 10, "mid-byte Motorola decodes what cantools encodes");
+        require(!fault->decode_raw(fault_payload, 1), "mid-byte Motorola refuses a short payload");
+
+        // Signed negative with an offset: -40 degC is the raw value 0.
+        const auto rt = t->decode_raw(payload, 8);
+        require(rt && *rt == 0, "raw temperature");
+        require(t->to_physical(rt ? *rt : 0) == -40.0, "negative offset applied");
+
+        // Enumerated status values drive the state mapping.
+        const auto* stage = r.database.find_by_name("PowerStage");
+        require(stage != nullptr, "PowerStage found");
+        const auto* status = stage->find_signal("Stage_Status");
+        require(status && status->values.size() == 4, "four enumerated statuses");
+        require(status->label_for(0) == "Off" && status->label_for(2) == "Charging", "labels resolved");
+        require(status->label_for(9).empty(), "unlisted value has no label");
+
+        const auto binding = auto_bind(r.database, 0.0, 500.0, 0.0, 200.0);
+        require(binding.has_value(), "auto_bind finds the measurement message");
+        require(binding->voltage_signal == "DC_Voltage" && binding->current_signal == "DC_Current",
+                "voltage and current bound by declared range");
+    }
+    {
+        // --- DBC in custody: profile_from_dbc rewires the live decode path ---
+        std::ifstream in("tests/fixtures/vendor_bay.dbc");
+        require(static_cast<bool>(in), "vendor fixture must be present");
+        std::ostringstream buf;
+        buf << in.rdbuf();
+        const auto db = parse_dbc(buf.str());
+        require(db.ok, "vendor DBC parses");
+
+        auto binding = auto_bind(db.database, 0.0, 500.0, 0.0, 200.0);
+        require(binding.has_value(), "auto_bind finds the measurement message");
+        require(binding->status_signal == "Stage_Status" && binding->status_id == 0x301,
+                "status carrier bound from the value table");
+
+        const auto prof = profile_from_dbc(db.database, *binding);
+        require(prof.ok, "the profile builds");
+        require(prof.status_bound, "the status map is bound");
+        const auto& p = prof.profile;
+        require(p.measurement_id == 0x300 && p.measurement_length == 8, "measurement message wired");
+        require(p.status_id == 0x301, "status id wired");
+        require(p.voltage_offset == 0 && p.current_offset == 2, "byte offsets follow the Motorola layout");
+        require(!p.little_endian, "endianness follows the DBC order flag");
+        require(p.voltage.numerator == 1 && p.voltage.denominator == 100, "factor 0.01 maps to a centi-unit scale");
+        require(p.current.numerator == 1 && p.current.denominator == 100, "current scale matches");
+        require(p.status_map[0] == kStatusOff && p.status_map[1] == kStatusReady,
+                "the value table becomes the status map");
+        require(p.status_map[2] == kStatusCharging && p.status_map[3] == kStatusFault,
+                "charging and fault meanings come from the labels");
+
+        // The rewired Monitor must decode the vendor frames, not the demo ones:
+        // 480.00 V and 100.00 A carried Motorola in 0x300, status from 0x301.
+        Config cfg;
+        cfg.protocol = p;
+        cfg.asset_id = "bay-dbc";
+        cfg.max_integration_step = std::chrono::hours(1);
+        cfg.measurement_timeout = std::chrono::hours(1);
+        cfg.status_timeout = std::chrono::hours(1);
+        Monitor mon(cfg);
+        const auto t0 = Clock::now();
+        CanFrame meas;
+        meas.id = 0x300;
+        meas.length = 8;
+        meas.received_at = t0;
+        meas.data[0] = 0xBB;  // Motorola: MSB first across bytes 0-1
+        meas.data[1] = 0x80;  // 0xBB80 = 48000 centivolts = 480.00 V
+        meas.data[2] = 0x27;  // bytes 2-3: 0x2710 = 10000 centiamps = 100.00 A
+        meas.data[3] = 0x10;
+        CanFrame st;
+        st.id = 0x301;
+        st.length = 1;
+        st.received_at = t0;
+        st.data[0] = 2;  // "Charging"
+        (void)mon.ingest(meas);
+        (void)mon.ingest(st);
+        const auto snap = mon.snapshot(t0);
+        require(snap.voltage_mv == 480000 && snap.current_ma == 100000,
+                "an OEM DBC decodes into the same exact milli-units");
+        require(snap.state == ChargeState::Charging, "the DBC status table drives the charge state");
+
+        // A non-16-bit field must be refused, not approximated.
+        DbcBinding binding_bad;
+        binding_bad.measurement_id = 0x300;
+        binding_bad.voltage_signal = "Pack_SOC";  // 8 bits
+        binding_bad.current_signal = "DC_Current";
+        const auto bad = profile_from_dbc(db.database, binding_bad);
+        require(!bad.ok && bad.error.find("16") != std::string::npos, "an 8-bit measurement is refused with a reason");
+
+        // A signed tariff-bearing channel is refused.
+        DbcBinding binding_signed;
+        binding_signed.measurement_id = 0x300;
+        binding_signed.voltage_signal = "DC_Voltage";
+        binding_signed.current_signal = "Amb_Temp";  // signed with a -40 offset
+        const auto signed_bad = profile_from_dbc(db.database, binding_signed);
+        require(!signed_bad.ok, "a signed/offset current signal is refused");
+    }
+    {
+        // Malformed input must be reported with a line, not silently accepted.
+        const auto r = parse_dbc("VERSION \"x\"\nBO_ notanumber Name: 8 X\n");
+        require(!r.ok, "a BO_ without an id is rejected");
+        require(!r.errors.empty(), "with a located error");
+        const auto empty = parse_dbc("");
+        require(empty.ok, "an empty document is not a fatal parse error");
+    }
+
+    // --- Time-of-use: a session crossing the off-peak / peak boundary ---
+    {
+        TimeOfUse tou;
+        tou.windows.push_back({"OFFPEAK", 0, 8 * 3600, 150000, 2000000});
+        tou.windows.push_back({"PEAK", 8 * 3600, 20 * 3600, 400000, 3000000});
+        tou.fallback = TimeWindow{"FLAT", 20 * 3600, 8 * 3600, 250000, 2500000};
+
+        // Window membership, including a window that wraps past midnight.
+        require(tou.windows[0].contains(0) && tou.windows[0].contains(7 * 3600), "off-peak contains early hours");
+        require(!tou.windows[0].contains(8 * 3600), "off-peak excludes the peak boundary");
+        require(tou.windows[1].contains(8 * 3600) && tou.windows[1].contains(19 * 3600), "peak range");
+        TimeWindow night{"NIGHT", 22 * 3600, 6 * 3600, 0, 0};
+        require(night.contains(23 * 3600) && night.contains(2 * 3600), "a wrapping window covers both sides");
+        require(!night.contains(12 * 3600), "a wrapping window excludes midday");
+
+        // 4800 W for three hours, 06:00 to 09:00 UTC, crossing the 08:00 boundary.
+        const std::int64_t uwh_per_s = 4800000;
+        std::vector<TimeSample> samples;
+        for (int h = 6; h <= 9; ++h) {
+            const std::int64_t offset = (h - 6) * 3600 * 1000;
+            samples.push_back({offset, uwh_per_s * offset / 1000, h * 3600});
+        }
+        const auto r = price_time_of_use(tou, samples, 500000, 1, 1);
+        require(r.periods.size() == 2, "the session splits at the tariff boundary");
+        require(r.periods[0].window == "OFFPEAK" && r.periods[1].window == "PEAK", "windows in time order");
+        require(r.unpriced_ms == 0, "every second is priced");
+        // 2 h off-peak at 0.15 EUR/kWh: exactly 34.56 kWh -> 5.184 EUR.
+        // Slices are labelled by the second they start in, so the second that
+        // ends exactly on the 08:00 boundary still belongs to off-peak.
+        require(r.periods[0].energy_uwh == 34560000000ull, "off-peak energy split");
+        require(r.periods[0].energy_cost_micro_eur == 5184000, "off-peak energy cost");
+        // 1 h peak at 0.40 EUR/kWh: exactly 17.28 kWh -> 6.912 EUR.
+        require(r.periods[1].energy_cost_micro_eur == 6912000, "peak energy cost");
+        require(r.total_energy_uwh == 51840000000ull, "period energies sum to the session total");
+        require(r.total_energy_cost_micro_eur == 5184000 + 6912000, "energy costs sum exactly");
+        require(r.total_cost_micro_eur == r.total_energy_cost_micro_eur + r.total_time_cost_micro_eur + 500000,
+                "the total is the sum of its parts plus the flat fee");
+        // Charging time: 2 h at 2.00 EUR/h plus 1 h at 3.00 EUR/h.
+        require(r.periods[0].time_cost_micro_eur == 4000000, "off-peak time cost");
+        require(r.periods[1].time_cost_micro_eur == 3000000, "peak time cost");
+    }
+    {
+        // A hole in the tariff must be reported, never silently free.
+        TimeOfUse tou;
+        tou.windows.push_back({"PEAK", 8 * 3600, 10 * 3600, 400000, 3000000});
+        std::vector<TimeSample> samples;
+        for (int h = 8; h <= 11; ++h) {
+            const std::int64_t offset = (h - 8) * 3600 * 1000;
+            samples.push_back({offset, 4800000 * offset / 1000, h * 3600});
+        }
+        const auto r = price_time_of_use(tou, samples, 0, 1, 1);
+        require(r.unpriced_ms > 0, "an uncovered second is flagged");
+        require(r.periods.back().window == "UNPRICED", "the uncovered stretch is labelled");
+    }
+    {
+        require(second_of_day_utc(0) == 0, "epoch is midnight");
+        require(second_of_day_utc(3661) == 3661, "same-day seconds");
+        require(second_of_day_utc(86400) == 0, "the next day wraps to midnight");
+        require(second_of_day_utc(-1) == 86399, "a pre-epoch value floors into the previous day");
+    }
+    {
+        // Apportionment must be exact even when it does not divide evenly.
+        // The old code floored each one-second slice independently and lost up
+        // to one microwatt-hour per slice; these numbers divide badly on
+        // purpose (1000001 uWh over 60000 ms is 16666.68 per slice).
+        TimeOfUse tou;
+        tou.windows.push_back({"ALLDAY", 0, 86399, 250000, 0});
+        std::vector<TimeSample> samples;
+        samples.push_back({0, 0, 0});
+        samples.push_back({60000, 1000001, 60});
+        const auto r = price_time_of_use(tou, samples, 0, 1, 1);
+        require(r.periods.size() == 1, "a single window yields a single period");
+        require(r.periods[0].energy_uwh == 1000001, "the slices sum back to the interval exactly");
+        require(r.total_energy_uwh == 1000001, "the total equals the parts");
+        require(r.unpriced_ms == 0 && r.dropped_ms == 0, "nothing was skipped");
+        require(!r.price_overflow, "an ordinary tariff does not overflow");
+    }
+    {
+        // A register that runs backwards cannot be priced, but its time must be
+        // reported rather than vanishing: the session span must reconcile.
+        TimeOfUse tou;
+        tou.windows.push_back({"ALLDAY", 0, 86399, 250000, 0});
+        std::vector<TimeSample> samples;
+        samples.push_back({0, 1000, 0});
+        samples.push_back({1000, 900, 1});
+        samples.push_back({2000, 1800, 2});
+        const auto r = price_time_of_use(tou, samples, 0, 1, 1);
+        require(r.dropped_ms == 1000, "the backwards interval is reported");
+        require(r.total_energy_uwh == 900, "only the usable interval is counted");
+        require(r.total_energy_uwh >= 0, "the total is never negative");
+        std::int64_t accounted = r.dropped_ms;
+        for (const auto& p : r.periods) accounted += p.duration_ms;
+        require(accounted == 2000, "priced time plus dropped time is the session span");
+    }
+    {
+        // An unrepresentable cost saturates and is flagged. Zero would read as
+        // free energy, which is the worst direction to fail in.
+        TimeOfUse tou;
+        tou.windows.push_back({"ALLDAY", 0, 86399, 4000000000000000000ll, 0});
+        std::vector<TimeSample> samples;
+        samples.push_back({0, 0, 0});
+        samples.push_back({1000, 10000000000ll, 1});
+        const auto r = price_time_of_use(tou, samples, 0, 1, 1);
+        require(r.price_overflow, "the overflow is reported");
+        require(r.periods[0].price_overflow, "the period is flagged");
+        require(r.periods[0].energy_cost_micro_eur == std::numeric_limits<std::int64_t>::max(),
+                "the cost saturates instead of reading as zero");
+    }
+    {
+        // A tariff that cannot be priced correctly is refused up front.
+        std::string error;
+        TimeOfUse degenerate;
+        degenerate.windows.push_back({"FULLDAY", 0, 0, 250000, 0});
+        require(!degenerate.validate(&error), "a zero-length window is refused");
+        require(error.find("degenerate") != std::string::npos, "the reason names the defect");
+
+        TimeOfUse overlapping;
+        overlapping.windows.push_back({"A", 0, 12 * 3600, 250000, 0});
+        overlapping.windows.push_back({"B", 8 * 3600, 20 * 3600, 400000, 0});
+        require(!overlapping.validate(&error), "two windows over the same second are refused");
+        require(error.find("both cover") != std::string::npos, "the reason names the overlap");
+
+        TimeOfUse negative_rate;
+        negative_rate.windows.push_back({"A", 0, 12 * 3600, -1, 0});
+        require(!negative_rate.validate(&error), "a negative rate is refused");
+
+        TimeOfUse good;
+        good.windows.push_back({"OFFPEAK", 0, 8 * 3600, 150000, 2000000});
+        good.windows.push_back({"PEAK", 8 * 3600, 20 * 3600, 400000, 3000000});
+        good.fallback = TimeWindow{"FLAT", 20 * 3600, 0, 250000, 2500000};
+        require(good.validate(&error), "a well-formed tariff validates");
+    }
+
+    // --- Dispute pack: the tariff of record and the chain provenance ---
+    {
+        Tariff record;
+        record.energy_micro_eur_per_kwh = 250000;
+        const std::string tariff = json_tariff_block(record);
+        // Exact integers only: a consumer must never re-derive cents.
+        require(tariff.find("energy_micro_eur_per_kwh\":\"") != std::string::npos,
+                "the tariff block carries exact integer prices");
+
+        // A closed session with a tariff snapshot and verifiable provenance.
+        std::string ignore;
+        const std::string journal =
+            (std::filesystem::temp_directory_path() /
+             ("charger_test_dispute_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+              ".journal"))
+                .string();
+        std::filesystem::remove(journal);
+        {
+            auto led = Ledger::open(journal, false, ignore);
+            require(led.has_value(), "the journal opens for writing");
+            const auto t0 = Clock::now();
+            Config cfg;
+            cfg.tariff.energy_micro_eur_per_kwh = 250000;
+            Monitor mon(cfg);
+            mon.ingest(status(2, t0));
+            mon.ingest(measurements(480, 10, t0));
+            mon.ingest(measurements(480, 10, t0 + std::chrono::seconds(1)));
+            mon.ingest(status(0, t0 + std::chrono::seconds(1)));
+            const auto snap = mon.snapshot(t0 + std::chrono::seconds(1));
+            require(snap.last_session && snap.last_session->billing_complete, "the session is billable");
+            const auto stamp = utc_timestamp();
+            const std::string payload = json_session_line(*snap.last_session, "bay-dispute", "EUR", stamp, tariff);
+            require(payload.find("\"tariff\":") != std::string::npos, "the session JSON embeds the tariff of record");
+            led->append_session_open(*snap.last_session, "bay-dispute", stamp);
+            // A second session opens immediately after the first closed. The
+            // open line carries no tariff of its own, so it must not inherit
+            // the previous session's: a stale copy there would still verify.
+            led->append_session_open(*snap.last_session, "bay-dispute", stamp);
+            // Force a session record shape independent of the demo state: use
+            // the last closed session for the close line.
+            led->append_session_close(*snap.last_session, "bay-dispute", "EUR", stamp, tariff);
+        }
+        {
+            auto led = Ledger::open(journal, false, ignore);
+            const auto rep = led->recover();
+            require(rep.chain_intact, "the dispute journal verifies");
+            require(led->sessions().size() == 1, "one settled session recovered");
+            const auto& s = led->sessions().front();
+            require(s.open_line == 2 && s.close_line == 3, "provenance points at the matching open line");
+            require(!s.close_hash.empty() && s.close_hash != s.close_prev_hash, "the close line links to its past");
+            require(s.tariff_json.find("250000") != std::string::npos, "the tariff of record is in the close line");
+
+            // The tariff of record lives on the close line only. A session_open
+            // has none of its own, so it must not inherit the previous one:
+            // a stale copy there would still verify against the chain.
+            {
+                std::ifstream f(journal, std::ios::binary);
+                const auto tariff_field = [](std::string l) {
+                    std::vector<std::string> fields;
+                    std::size_t start = 0;
+                    while (true) {
+                        const auto tab = l.find('\t', start);
+                        if (tab == std::string::npos) {
+                            fields.push_back(l.substr(start));
+                            break;
+                        }
+                        fields.push_back(l.substr(start, tab - start));
+                        start = tab + 1;
+                    }
+                    return fields.size() >= 2 ? fields[fields.size() - 2] : std::string("<short>");
+                };
+                std::string line;
+                std::getline(f, line);
+                require(tariff_field(line).empty(), "the first open line has no tariff of record");
+                std::getline(f, line);
+                require(tariff_field(line).empty(), "the second open line does not inherit the tariff");
+                std::getline(f, line);
+                require(tariff_field(line).find("charger.tariff.v1") != std::string::npos,
+                        "the close line carries the tariff of record");
+            }
+
+            const std::string whole = [&journal] {
+                std::ifstream f(journal, std::ios::binary);
+                std::ostringstream b;
+                b << f.rdbuf();
+                return b.str();
+            }();
+            const auto doc = json_dispute(s, rep, journal, sha256_hex(whole));
+            require(doc.find("\"schema\":\"charger.dispute.v1\"") != std::string::npos, "dispute schema");
+            require(doc.find(s.close_hash) != std::string::npos, "the pack carries the close hash");
+            require(doc.find("\"close_line_raw\":") != std::string::npos, "the raw close line travels with it");
+            // The embedded tariff block allows recomputing the invoice offline.
+            require(
+                doc.find("\"tariff\":\"{") == std::string::npos || doc.find("charger.tariff.v1") != std::string::npos,
+                "the tariff of record travels with the dispute");
+            const auto cdr = json_cdr(s);
+            require(cdr.find("\"schema\":\"charger.cdr.v1\"") != std::string::npos, "cdr schema");
+            require(cdr.find("\"derived_start_utc\"") != std::string::npos, "cdr start is labelled derived");
+            require(cdr.find("\"vat\":\"omitted\"") != std::string::npos, "cdr vat omitted, not zero-rated");
+        }
+        std::filesystem::remove(journal);
+    }
+
+    // --- TOU tariff file: validated, coverage-checked, strict refusal ---
+    {
+        const std::string good = std::string("{\"schema\":\"charger.tou.v1\",\"windows\":[") +
+                                 "{\"name\":\"OFFPEAK\",\"start\":\"00:00\",\"end\":\"08:00\","
+                                 "\"energy_eur_per_kwh\":\"0.15\",\"time_eur_per_hour\":\"2.00\"}," +
+                                 "{\"name\":\"PEAK\",\"start\":\"08:00\",\"end\":\"20:00\","
+                                 "\"energy_eur_per_kwh\":\"0.40\",\"time_eur_per_hour\":\"3.00\"}," +
+                                 "{\"name\":\"EVENING\",\"start\":\"20:00\",\"end\":\"00:00\","
+                                 "\"energy_eur_per_kwh\":\"0.25\",\"time_eur_per_hour\":\"2.50\"}]}";
+        auto loaded = parse_tou_json(good);
+        require(loaded.ok, "the example TOU tariff must parse: " + loaded.error);
+        const auto cov = tou_coverage(loaded.tou);
+        require(cov.full && cov.covered_s == 86400 && cov.uncovered_s == 0, "three windows must cover the day");
+        const std::vector<TimeSample> cross{{0, 0, 7 * 3600 + 1800}, {3600 * 1000, 4800000000, 8 * 3600 + 1800}};
+        std::string serr;
+        const auto strict = price_time_of_use_strict(loaded.tou, cross, 0, 1, 1, serr);
+        require(strict.has_value(), "a complete tariff must price: " + serr);
+        require(strict->periods.size() == 2, "the boundary must split the session in two periods");
+        require(strict->unpriced_ms == 0, "no second may be left unpriced");
+        // 2.4 kWh at 0.15 EUR/kWh = 0.36 EUR = 360000 micro-EUR; at 0.40 = 960000.
+        require(strict->total_energy_cost_micro_eur == 360000 + 960000, "TOU energy total is exact");
+    }
+    {
+        const std::string overlap = std::string("{\"schema\":\"charger.tou.v1\",\"windows\":[") +
+                                    "{\"name\":\"A\",\"start\":\"00:00\",\"end\":\"12:00\","
+                                    "\"energy_eur_per_kwh\":\"0.10\",\"time_eur_per_hour\":\"1.00\"}," +
+                                    "{\"name\":\"B\",\"start\":\"06:00\",\"end\":\"18:00\","
+                                    "\"energy_eur_per_kwh\":\"0.20\",\"time_eur_per_hour\":\"1.00\"}]}";
+        require(!parse_tou_json(overlap).ok, "overlapping windows must be refused");
+    }
+    {
+        const std::string hole = std::string("{\"schema\":\"charger.tou.v1\",\"windows\":[") +
+                                 "{\"name\":\"DAY\",\"start\":\"08:00\",\"end\":\"20:00\","
+                                 "\"energy_eur_per_kwh\":\"0.30\",\"time_eur_per_hour\":\"2.00\"}]}";
+        auto loaded = parse_tou_json(hole);
+        require(loaded.ok, "a single window parses");
+        require(!tou_coverage(loaded.tou).full, "one window cannot cover the day");
+        const std::vector<TimeSample> night{{0, 0, 3600}, {3600 * 1000, 1000000, 7200}};
+        std::string serr;
+        require(!price_time_of_use_strict(loaded.tou, night, 0, 1, 1, serr).has_value(),
+                "the strict pricer must refuse a hole");
+        require(serr.find("incomplete") != std::string::npos, "the refusal names the hole");
+    }
+    {
+        const std::string fb = std::string("{\"schema\":\"charger.tou.v1\",\"windows\":[") +
+                               "{\"name\":\"DAY\",\"start\":\"08:00\",\"end\":\"20:00\","
+                               "\"energy_eur_per_kwh\":\"0.30\",\"time_eur_per_hour\":\"2.00\"}]," +
+                               "\"fallback\":{\"name\":\"NIGHT\",\"energy_eur_per_kwh\":\"0.10\","
+                               "\"time_eur_per_hour\":\"1.00\"}}";
+        auto loaded = parse_tou_json(fb);
+        require(loaded.ok, "fallback tariff must parse: " + loaded.error);
+        require(tou_coverage(loaded.tou).full, "a catch-all fallback covers the day");
+        const std::vector<TimeSample> night{{0, 0, 3600}, {3600 * 1000, 1000000, 7200}};
+        std::string serr;
+        const auto r = price_time_of_use_strict(loaded.tou, night, 0, 1, 1, serr);
+        require(r.has_value(), "fallback prices the night: " + serr);
+        require(r->periods.size() == 1 && r->periods.front().window == "NIGHT", "night priced at fallback");
+    }
+
+    // --- Journal anchor: prefix proven while the journal keeps growing ---
+    {
+        const std::string journal =
+            (std::filesystem::temp_directory_path() / "charger_anchor_test.journal").string();
+        const std::string anchor =
+            (std::filesystem::temp_directory_path() / "charger_anchor_test.anchor").string();
+        std::filesystem::remove(journal);
+        std::filesystem::remove(anchor);
+        std::string ignore;
+        {
+            auto led = Ledger::open(journal, true, ignore);
+            require(led.has_value(), "anchor test journal opens");
+            Monitor m;
+            const auto base = Clock::now();
+            m.ingest(measurements(480, 10, base));
+            m.ingest(status(2, base));
+            for (int i = 1; i <= 3; ++i) m.ingest(measurements(480, 10, base + std::chrono::seconds(i)));
+            m.ingest(status(0, base + std::chrono::seconds(4)));
+            (void)m.tick(base + std::chrono::seconds(4));
+            const auto snap = m.snapshot(base + std::chrono::seconds(4));
+            require(snap.last_session.has_value(), "anchor test closed a session");
+            led->append_session_open(*snap.last_session, "bay-anchor", "2026-01-01T00:00:00Z");
+            led->append_session_close(*snap.last_session, "bay-anchor", "EUR", "2026-01-01T01:00:00Z",
+                                      json_tariff_block(m.config().tariff));
+        }
+        JournalAnchor a;
+        std::string aerr;
+        require(write_journal_anchor(journal, anchor, a, aerr), "anchor writes: " + aerr);
+        require(a.lines == 2, "two lines anchored");
+        std::uint64_t appended = 99;
+        require(verify_journal_anchor(journal, anchor, appended, aerr), "anchor verifies: " + aerr);
+        require(appended == 0, "nothing appended yet");
+        {
+            auto led = Ledger::open(journal, false, ignore);
+            auto rep = led->recover();
+            (void)rep;
+            SessionRecord extra;
+            extra.id = 7;
+            led->append_session_open(extra, "bay-anchor", "2026-01-02T00:00:00Z");
+        }
+        require(verify_journal_anchor(journal, anchor, appended, aerr), "anchor survives appends: " + aerr);
+        require(appended == 1, "one line appended since the anchor");
+        {
+            std::ifstream f(journal, std::ios::binary);
+            std::ostringstream b;
+            b << f.rdbuf();
+            std::string whole = b.str();
+            const auto nl = whole.find('\n');
+            require(nl != std::string::npos, "journal has lines");
+            if (whole.size() > nl + 20) whole[nl + 20] = (whole[nl + 20] == 'a' ? 'b' : 'a');
+            std::ofstream o(journal, std::ios::binary | std::ios::trunc);
+            o << whole;
+        }
+        require(!verify_journal_anchor(journal, anchor, appended, aerr), "a rewritten prefix fails the anchor");
+        std::filesystem::remove(journal);
+        std::filesystem::remove(anchor);
     }
 
     std::cout << "All tests passed\n";
