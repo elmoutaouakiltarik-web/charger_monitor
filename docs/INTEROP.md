@@ -18,7 +18,7 @@ session is a stream of `TransactionEvent` messages with `Started`, zero or more
 
 | Monitor event | OCPP 2.0.1 equivalent | Note |
 | --- | --- | --- |
-| `SESSION_OPENED` | `TransactionEvent(eventType=Started, transactionInfo.transactionId, triggerReason=Authorized)` | `transactionId` is a string up to 36 chars; the monitor uses a `std::uint64_t` id |
+| `SESSION_OPENED` | `TransactionEvent(eventType=Started, transactionInfo.transactionId, triggerReason=Authorized)` | `transactionId` is a string up to 36 chars; the monitor uses a `std::uint64_t` id, so a backend must map it (e.g. pad with the journal close timestamp) |
 | accepted measurement frames | `TransactionEvent(eventType=Updated)` | the monitor logs locally instead of streaming, so the backend decides the cadence |
 | `SESSION_CLOSED` | `TransactionEvent(eventType=Ended, stoppedReason=...)` | the stop reason is mapped below |
 
