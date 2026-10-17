@@ -1,4 +1,4 @@
-# Charger Monitor — C++17 CLI and core library (v1.3.0)
+# Charger Monitor — C++17 CLI and core library (v1.4.0)
 
 Bay monitor for industrial DC chargers. It listens on the bus and never
 commands the power stage.
@@ -38,7 +38,7 @@ safety function and **not** a fiscal or legal meter (MID).
 
 See [../SECURITY.md](../SECURITY.md) for what counts as a vulnerability.
 
-## Demo protocol (replace with the manufacturer specification)
+## Demo protocol (or the manufacturer DBC, see below)
 
 - ID `0x180`, 8 bytes: voltage in centivolts in bytes 0–1 (unsigned 16-bit
   little-endian), current in centiamps in bytes 2–3, bytes 4–7 reserved and
@@ -100,7 +100,13 @@ on stderr, and a broken chain is surfaced instead of being ignored.
 
 ```bash
 ./build/charger_monitor --verify-journal --journal bay-07.journal   # exit 0 intact, 3 altered
+./build/charger_monitor --anchor-journal --journal bay-07.journal --anchor-file bay-07.anchor   # pin the prefix
+./build/charger_monitor --verify-anchor --journal bay-07.journal --anchor-file bay-07.anchor    # exit 3 if rewritten
 ./build/charger_monitor --portfolio bay-07.journal                  # fleet KPI
+./build/charger_settle bay-07.journal --dispute bay-07 12           # dispute evidence pack
+./build/charger_settle bay-07.journal --cdr bay-07 12               # OCPI CDR subset (charger.cdr.v1)
+./build/charger_settle bay-07.journal --check-tou tou.json          # refuse holes and overlaps (exit 2)
+./build/charger_settle bay-07.journal --tou-settle tou.json --summary  # exact totals + labelled TOU estimate
 ```
 
 Verified by the test suite: 480 V, 10 A, 1 h, priced at 0.25 EUR/kWh +
@@ -119,6 +125,93 @@ cost_micro_eur \t billable \t stop_reason \t undersampled \t json_payload
 The tab-delimited prefix exists so recovery needs no JSON parser. The JSON tail
 is there for auditors. `sha256_hex()` is exported, so the chain can be
 recomputed with any standard tool.
+
+The close line also carries the **tariff of record** (exact integer micro-EUR
+prices plus step sizes). This is what makes `charger_settle --dispute` work:
+the pack combines meter values, the tariff that was in force, the calculation
+and the chain provenance (`open`/`close` line numbers, `close_prev_hash`,
+`close_hash`, the raw close line, and the digest of the whole journal file),
+with a verification recipe readable without our binaries.
+
+## Vendor DBC adoption
+
+A real fleet speaks the OEM's protocol, not the demo one. Hand a vendor
+`.dbc` to the monitor instead of inventing identifiers:
+
+```bash
+./build/charger_monitor --replay < frames.txt \
+    --dbc vendor.dbc --voltage-signal DC_Voltage --current-signal DC_Current
+./build/charger_monitor --dump-dbc --dbc vendor.dbc    # inspect what was parsed
+```
+
+Binding rules, enforced before any byte is billed:
+
+- measurement signals must be exactly 16 bits, unsigned, zero-offset, and
+  byte-aligned (Intel or Motorola), so the codec maps them bit-exactly;
+- the factor must be representable as an exact rational scale (`0.01` →
+  `num=1/den=100`), never approximated;
+- the status carrier must be a 1-byte message whose `VAL_` table maps to at
+  least two distinct meanings (OFF/READY/CHARGING/FAULT); negated labels such
+  as "not charging" are refused rather than guessed;
+- anything else aborts startup with the reason: a guessed decode of a billing
+  channel silently invoices wrong numbers.
+
+The DBC reader is validated bit-exactly against cantools 45.x. The bit layout
+was checked for both endiannesses at every start position 0..63 and every
+length from 1 to 64 bits, including Motorola signals that start in the middle
+of a byte; the test suite pins the byte-aligned, mid-byte and signed-with-offset
+cases with payloads cantools itself produces.
+
+## Time-of-use windows
+
+An hour of charging between 02:00 and 03:00 is not worth the same as the same
+hour between 17:00 and 18:00. A single flat rate cannot express that, and a
+session that crosses a window boundary is one of the most common reasons a
+settlement is disputed.
+
+`charger_tou.hpp` splits one session into `ChargingPeriod` stretches and prices
+each one at its own rate:
+
+```cpp
+charger::TimeOfUse tou;
+tou.windows.push_back({"OFFPEAK", 0, 8 * 3600, 150000, 2000000});
+tou.windows.push_back({"PEAK", 8 * 3600, 20 * 3600, 400000, 3000000});
+tou.fallback = charger::TimeWindow{"FLAT", 20 * 3600, 8 * 3600, 250000, 2500000};
+
+const charger::TimeOfUseResult r =
+    charger::price_time_of_use(tou, samples, 250000, 1, 1);
+```
+
+Guarantees:
+
+- windows are UTC; `end < start` wraps past midnight, and `end == start` (a
+  degenerate window) matches nothing, which `TimeOfUse::validate()` rejects;
+- `TimeOfUse::validate()` also rejects out-of-range windows, negative rates and
+  two windows covering the same second, which would otherwise be priced at
+  whichever came first. Call it on any tariff you did not assemble yourself;
+- intervals are walked in one-second slices, so a boundary inside a sample
+  interval splits it exactly instead of billing the whole interval at whichever
+  rate happened to be current when it started;
+- each slice receives the difference between the cumulative apportionment and
+  the one before it, so the slices of an interval sum back to the interval
+  total exactly. Flooring each slice separately would leak up to one
+  microwatt-hour per slice, and `total_energy_uwh` always equals the sum of
+  `periods[].energy_uwh`;
+- an interval whose energy register ran backwards cannot be priced, so its
+  duration is reported in `dropped_ms` rather than silently disappearing;
+- `unpriced_ms` counts the seconds that no window and no fallback covered: such
+  time is priced at **zero**, which is why the field exists. A caller that
+  ignores it will under-bill, so check it before settling;
+- a cost that does not fit in 64 bits saturates and raises `price_overflow`. It
+  is never truncated and never left at zero, because free energy is the worst
+  possible direction to fail in on a billing channel;
+- `flat_cost_micro_eur` is returned next to the windowed total, so the effect of
+  a TOU tariff is measured rather than asserted.
+
+The caller supplies the UTC second of day for each sample, which keeps the core
+clock-injected and deterministic. This is a library component: the monitor's own
+billing path prices a session at one rate, so apply TOU in `charger_settle` or
+in your backend rather than expecting `--replay` to use it.
 
 ## Session model
 
@@ -226,8 +319,10 @@ cfg.protocol.status_map[9] = kStatusCharging;
 - **NIST ISO 23247**: separating the model, its synchronised data and its
   business purpose.
 
-The implemented model is a declared subset: no VAT, no time-of-use, no
-restrictions, no `PARKING_TIME`.
+The implemented model is a declared subset: no VAT, no restrictions, no
+`PARKING_TIME`. The billing path prices a session at one rate; time-of-use is a
+separate opt-in module (see [Time-of-use windows](#time-of-use-windows)) that
+the caller applies.
 
 ## Notes
 
