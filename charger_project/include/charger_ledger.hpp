@@ -54,6 +54,17 @@ struct RecoveryReport {
     bool truncated_last_line{false};
 };
 
+// One closed session as recovered from the journal, with the fields a billing
+// settlement needs. Kept separate from SessionRecord so a settlement tool never
+// has to re-parse the JSON payload.
+struct SettledSession {
+    std::string asset_id;
+    std::uint64_t id{0};
+    SessionRecord record{};
+    std::string currency;
+    std::string closed_at_utc;
+};
+
 class Ledger {
    public:
     Ledger() = default;
@@ -85,6 +96,10 @@ class Ledger {
     // needs no running process.
     std::optional<PortfolioKpi> portfolio() const;
 
+    // Every closed session, in journal order. This is the input a settlement or
+    // invoicing run consumes, so the caller never parses JSON itself.
+    const std::vector<SettledSession>& sessions() const noexcept { return sessions_; }
+
    private:
     std::string path_;
     std::string last_hash_{LEDGER_GENESIS_HASH};
@@ -96,6 +111,11 @@ class Ledger {
     std::uint64_t opens_{0};
     std::vector<std::pair<std::string, std::uint64_t>> open_sessions_;
     std::vector<PortfolioAsset> per_asset_;
+    std::vector<SettledSession> sessions_;
+    // Set by the public append_* methods immediately before append() so the
+    // tab-delimited prefix can carry them without parsing the JSON payload.
+    std::string context_currency_;
+    std::string context_timestamp_;
     bool fsync_on_commit_{true};
 
     bool append(const std::string& type, const std::string& asset, const SessionRecord& rec,

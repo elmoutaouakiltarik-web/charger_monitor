@@ -240,12 +240,22 @@ void Ledger::track(const std::string& asset, const SessionRecord& rec, const std
 
 bool Ledger::append(const std::string& type, const std::string& asset, const SessionRecord& rec,
                     const std::string& json_payload) {
-    // stop_reason is tab-free by construction, so it is safe in the prefix.
+    // Prefix layout, extended forward-compatibly: the first nine fields are the
+    // v1.3.0 contract and never change, so an older reader still finds them in
+    // place and a newer reader treats missing trailing fields as zero.
+    // stop_reason, asset, quality, currency and the timestamp are tab-free by
+    // construction, so they are safe in the prefix.
     std::ostringstream rest;
     rest << type << kTab << asset << kTab << rec.id << kTab << rec.energy_uwh << kTab << rec.duration_ms << kTab
          << rec.total_cost_micro_eur << kTab << (rec.billing_complete ? 1 : 0) << kTab
          << (rec.stop_reason.empty() ? std::string("-") : rec.stop_reason) << kTab << (rec.undersampled ? 1 : 0) << kTab
-         << json_payload;
+         << rec.energy_wh << kTab << rec.billed_energy_wh << kTab << rec.charging_s << kTab << rec.billed_time_s << kTab
+         << rec.energy_cost_micro_eur << kTab << rec.time_cost_micro_eur << kTab << rec.flat_cost_micro_eur << kTab
+         << rec.samples << kTab << rec.integration_gaps << kTab << (rec.time_upper_bound ? 1 : 0) << kTab
+         << (rec.energy_lower_bound ? 1 : 0) << kTab << rec.quality << kTab << context_currency_ << kTab
+         << context_timestamp_ << kTab << json_payload;
+    context_currency_.clear();
+    context_timestamp_.clear();
 
     const std::string prev = last_hash_;
     const std::string hash = sha256_hex(prev + kTab + rest.str());
@@ -275,6 +285,8 @@ bool Ledger::append(const std::string& type, const std::string& asset, const Ses
 
 void Ledger::append_session_open(const SessionRecord& rec, const std::string& asset_id,
                                  const std::string& opened_at_utc) {
+    context_currency_.clear();
+    context_timestamp_ = opened_at_utc;
     std::ostringstream o;
     o << "{\"schema\":\"" << LEDGER_SCHEMA << "\",\"type\":\"session_open\",\"asset_id\":\"" << asset_id
       << "\",\"session_id\":" << rec.id << ",\"opened_at_utc\":\"" << opened_at_utc << "\"}";
@@ -283,7 +295,16 @@ void Ledger::append_session_open(const SessionRecord& rec, const std::string& as
 
 void Ledger::append_session_close(const SessionRecord& rec, const std::string& asset_id, const std::string& currency,
                                   const std::string& closed_at_utc) {
+    context_currency_ = currency;
+    context_timestamp_ = closed_at_utc;
     append("session_close", asset_id, rec, json_session_line(rec, asset_id, currency, closed_at_utc));
+    SettledSession s;
+    s.asset_id = asset_id;
+    s.id = rec.id;
+    s.record = rec;
+    s.currency = currency;
+    s.closed_at_utc = closed_at_utc;
+    sessions_.push_back(s);
 }
 
 RecoveryReport Ledger::recover() {
@@ -304,6 +325,7 @@ RecoveryReport Ledger::recover() {
     opens_ = 0;
     open_sessions_.clear();
     per_asset_.clear();
+    sessions_.clear();
 
     std::string prev = LEDGER_GENESIS_HASH;
     std::string line;
@@ -347,6 +369,28 @@ RecoveryReport Ledger::recover() {
         rec.stop_reason = (parts.size() > 9 && parts[9] != "-") ? parts[9] : std::string();
         rec.undersampled = parts.size() > 10 && parts[10] == "1";
         rec.closed = type != "session_open";
+        // Forward-compatible trailing fields (absent in journals written before
+        // v1.3.0 are left at zero, which is the safe settlement default).
+        const auto num = [&parts](std::size_t idx) -> std::uint64_t {
+            if (idx >= parts.size()) return 0;
+            std::uint64_t v = 0;
+            parse_u64(parts[idx], v);
+            return v;
+        };
+        rec.energy_wh = num(11);
+        rec.billed_energy_wh = num(12);
+        rec.charging_s = static_cast<std::int64_t>(num(13));
+        rec.billed_time_s = static_cast<std::int64_t>(num(14));
+        rec.energy_cost_micro_eur = static_cast<std::int64_t>(num(15));
+        rec.time_cost_micro_eur = static_cast<std::int64_t>(num(16));
+        rec.flat_cost_micro_eur = static_cast<std::int64_t>(num(17));
+        rec.samples = static_cast<std::uint32_t>(num(18));
+        rec.integration_gaps = static_cast<std::uint32_t>(num(19));
+        rec.time_upper_bound = num(20) == 1;
+        rec.energy_lower_bound = num(21) == 1;
+        rec.quality = parts.size() > 22 ? parts[22] : std::string();
+        const std::string currency = parts.size() > 23 ? parts[23] : std::string();
+        const std::string closed_at = parts.size() > 24 ? parts[24] : std::string();
 
         track(asset, rec, type);
         if (rec.closed) {
@@ -354,6 +398,13 @@ RecoveryReport Ledger::recover() {
             rep.energy_uwh += rec.energy_uwh;
             rep.revenue_micro_eur += cost;
             if (rec.billing_complete) ++rep.billable_sessions;
+            SettledSession s;
+            s.asset_id = asset;
+            s.id = rec.id;
+            s.record = rec;
+            s.currency = currency;
+            s.closed_at_utc = closed_at;
+            sessions_.push_back(s);
         } else {
             ++rep.session_opens;
         }

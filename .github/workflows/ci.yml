@@ -120,4 +120,5 @@ jobs:
       - name: Check formatting
         run: |
           cd charger_project
-          clang-format --dry-run --Werror src/*.cpp tests/*.cpp include/*.hpp
+          clang-format --dry-run --Werror \
+            src/*.cpp tests/*.cpp include/*.hpp tools/*/main.cpp examples/consume_library/*.cpp

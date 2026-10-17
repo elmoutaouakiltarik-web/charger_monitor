@@ -1,19 +1,35 @@
 # charger_monitor
 
+[![CI](https://github.com/OWNER/charger_monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/charger_monitor/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![C++](https://img.shields.io/badge/c%2B%2B-17-blue.svg)](charger_project/CMakeLists.txt)
+[![Dependencies](https://img.shields.io/badge/dependencies-none-success.svg)](CONTRIBUTING.md)
+
 Deterministic monitoring library for industrial DC charger bays.
 
 It listens to a CAN bus, reconstructs an **exact** charging-session ledger,
 persists it in a **durable, tamper-evident journal**, and rolls it up into
 **fleet KPIs**. It never commands the power stage.
 
-[![CI](https://github.com/OWNER/charger_monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/charger_monitor/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![C++](https://img.shields.io/badge/c%2B%2B-17-blue.svg)](CMakeLists.txt)
-[![Dependencies](https://img.shields.io/badge/dependencies-none-success.svg)](CONTRIBUTING.md)
+<p align="center">
+  <img src="docs/social-preview.png" alt="Exact charging-session ledger for industrial DC charger bays" width="720">
+</p>
 
 > **This is not firmware.** Not a certified controller, not a safety function,
 > not a legal or fiscal meter (MID). See [SECURITY.md](SECURITY.md) for the
 > deliberate non-goals before you deploy anything.
+
+## See it in 10 seconds
+
+```bash
+cmake -S charger_project -B build -DCHARGER_WERROR=ON
+cmake --build build --parallel
+./build/charger_demo
+```
+
+`charger_demo` walks a full shift and prints, as it happens: the exact energy
+of an hour-long session, what happens to a session when the bus drops, why a
+restart does not lose billing data, and what a tampered journal does.
 
 ## Why this exists
 
@@ -45,13 +61,34 @@ cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 
 # One hour at 480 V / 10 A priced at 0.25 EUR/kWh + 3.60 EUR/h + 0.50 EUR flat
-printf '180#80BBE80300000000\n181#02\n' > frames.txt
-# (interleave the measurement every second with --replay-interval-ms 1000)
-
-./build/charger_monitor --replay --journal bay.journal --replay-interval-ms 1000
+./build/charger_monitor --replay --journal bay.journal --replay-interval-ms 1000 < frames.txt
 ./build/charger_monitor --verify-journal --journal bay.journal
+./build/charger_settle bay.journal --summary
 ./build/charger_monitor --portfolio bay.journal
 ```
+
+## The tools
+
+Three small tools ship with the library. Each is also a downstream consumer, so
+they double as a compile-time check that the public headers are self-contained.
+
+| Tool | What it is for |
+| --- | --- |
+| [`charger_demo`](charger_project/tools/charger_demo) | Narrated walkthrough: cold start, session, dropout, diagnostics, crash recovery, fleet rollup |
+| [`charger_settle`](charger_project/tools/charger_settle) | Billing settlement from a journal: a CSV of invoice-now vs held-for-review, with the reason each held session was held |
+| [`charger_bench`](charger_project/tools/charger_bench) | Measures exactness against a double accumulator, and throughput |
+
+`charger_bench` prints measured numbers, not claims:
+
+```
+            0.1 Wh x 1e6 (uWh)      100000000000      100000000001  DRIFTS by 1
+     100k x 0.008333 EUR         833300000         833299999  DRIFTS by -1
+        480 V*10 A*1 h (Wh)              4800              4800  EXACT
+  throughput       1117142 frames/s
+```
+
+A 500 kbit/s CAN bus at 1 Hz delivers roughly 3 500 frames/s, so throughput is
+not a constraint here. Exactness is.
 
 ## Use it as a library
 
@@ -122,10 +159,35 @@ on stderr, and a broken chain is surfaced instead of being ignored.
 
 ## Documentation
 
+- [charger_project/README.md](charger_project/README.md) — CLI reference, demo protocol, diagnostics, schema fields
+- [docs/INTEROP.md](docs/INTEROP.md) — field-by-field mapping to OCPP 2.0.1 and OCPI 2.2.1
 - [CONTRIBUTING.md](CONTRIBUTING.md) — the five ground rules and the pre-merge checks
 - [SECURITY.md](SECURITY.md) — deliberate non-goals and what counts as a vulnerability
 - [CHANGELOG.md](CHANGELOG.md) — release history
-- [charger_project/README.md](charger_project/README.md) — CLI reference, protocol, diagnostics, schema fields
+
+## Interoperability
+
+This library does not speak OCPP or OCPI, and does not need to. It produces the
+exact local record; a backend maps it onto the standard vocabulary.
+[docs/INTEROP.md](docs/INTEROP.md) maps every field, including `stoppedReason`,
+the `Energy.Active.Import.Register` measurand and the `ENERGY`/`TIME`/`FLAT`
+tariff dimensions, so nothing has to be reverse-engineered.
+
+## Roadmap
+
+Deliberately scoped. Anything here that would compromise exactness or the
+zero-dependency property is not on the list.
+
+- [x] Exact integer session ledger
+- [x] Durable hash-chained journal with crash recovery
+- [x] Fleet rollup and settlement report
+- [x] Predictive diagnostics
+- [x] Versioned JSON configuration
+- [x] Consumable CMake package
+- [ ] An optional OCPP 2.0.1 client behind a compile-time flag
+- [ ] Multi-bay aggregation from a single journal process
+- [ ] IEC 61851 / CCS signal decoding as a protocol profile
+- [ ] A pluggable signed-CDR exporter (the chain is evidence, not a wire format)
 
 ## Verification
 
@@ -139,6 +201,7 @@ CI runs on every push:
 | fuzz (libFuzzer, 20 s) | No crash on malformed frames, tariffs or journal rows |
 | end-to-end replay | The documented state sequence and ledger contract |
 | journal tamper detection | A modified journal fails verification with a non-zero exit |
+| tool smoke tests | The demo and settlement tools run and assert exact figures |
 | consumable package | An external project can `find_package` and link it |
 | clang-format | Formatting matches `.clang-format` |
 

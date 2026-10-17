@@ -1,5 +1,5 @@
 #!/bin/bash
-# # End-to-end test without a real bus: cansend-style frames into --replay,
+# End-to-end test without a real bus: cansend-style frames into --replay,
 # verifying the documented state sequence and ledger contract in the JSON output.
 #
 # The binary can be overridden with CHARGER_MONITOR_BIN so the same contract

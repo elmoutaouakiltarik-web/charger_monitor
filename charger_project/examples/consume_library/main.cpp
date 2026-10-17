@@ -15,9 +15,9 @@ using namespace charger;
 int main() {
     Config cfg;
     cfg.asset_id = "bay-consumer";
-    cfg.tariff.energy_micro_eur_per_kwh = 250000;   // 0.25 EUR/kWh
-    cfg.tariff.time_micro_eur_per_hour = 3600000;   // 3.60 EUR/h
-    cfg.tariff.flat_micro_eur = 500000;             // 0.50 EUR per session
+    cfg.tariff.energy_micro_eur_per_kwh = 250000;  // 0.25 EUR/kWh
+    cfg.tariff.time_micro_eur_per_hour = 3600000;  // 3.60 EUR/h
+    cfg.tariff.flat_micro_eur = 500000;            // 0.50 EUR per session
     // One hour of constant current, integrated as a single trapezoid.
     cfg.max_integration_step = std::chrono::hours(1);
     cfg.measurement_timeout = std::chrono::hours(1);

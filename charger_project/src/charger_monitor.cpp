@@ -492,11 +492,14 @@ void Monitor::diagnose(const Sample& sample, std::vector<Event>& events) {
         }
     }
 
-    // Stuck-at: the value has not moved for the whole window while the power
-    // stage claims to be charging. One warning per window, not per sample.
+    // Stuck-at: a frozen channel is only suspicious when it contradicts what a
+    // real charge looks like. Constant load at a plausible voltage and a real
+    // current is normal operation, not a fault, so requiring both avoids
+    // crying wolf on every steady charging profile.
+    const bool plausible_load = sample.current_ma > 0 && sample.voltage_mv > 0;
     const bool unchanged =
         diag_last_ && sample.voltage_mv == diag_last_->voltage_mv && sample.current_ma == diag_last_->current_ma;
-    if (unchanged) {
+    if (unchanged && plausible_load) {
         if (!diag_stuck_since_) diag_stuck_since_ = now;
     } else {
         diag_stuck_since_.reset();
@@ -508,7 +511,7 @@ void Monitor::diagnose(const Sample& sample, std::vector<Event>& events) {
             diag_stuck_reported_ = true;
             ++kpi_.stuck_at_warnings;
             events.push_back({EventLevel::Warning, "MEASUREMENT_STUCK",
-                              "Measurements frozen at constant load: suspect a stuck sensor"});
+                              "Measurements frozen at a plausible load: suspect a stuck sensor or cable"});
         }
     }
     diag_last_ = sample;

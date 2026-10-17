@@ -13,6 +13,7 @@ option(CHARGER_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitize
 include(CTest) # defines BUILD_TESTING
 option(CHARGER_BUILD_TESTS "Build the automated tests" ${BUILD_TESTING})
 option(CHARGER_BUILD_FUZZ "Build the libFuzzer harness (requires clang with -fsanitize=fuzzer)" OFF)
+option(CHARGER_BUILD_TOOLS "Build the demo, settlement and benchmark tools" ON)
 
 if(CHARGER_SANITIZERS)
     set(SANFLAGS -fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie)
@@ -49,6 +50,23 @@ if(CHARGER_BUILD_TESTS)
     target_link_options(charger_tests PRIVATE ${SANLINK})
     target_compile_definitions(charger_tests PRIVATE CHARGER_VERSION="${PROJECT_VERSION}")
     add_test(NAME charger_state_machine COMMAND charger_tests)
+endif()
+
+if(CHARGER_BUILD_TOOLS)
+    # These are also downstream consumers of charger::core, so they double as a
+    # compile-time check that the public headers are self-contained.
+    foreach(tool charger_demo charger_settle charger_bench)
+        add_executable(${tool} tools/${tool}/main.cpp)
+        target_link_libraries(${tool} PRIVATE charger_core)
+        target_compile_options(${tool} PRIVATE -Wall -Wextra -Wpedantic ${SANFLAGS})
+        target_link_options(${tool} PRIVATE ${SANLINK})
+    endforeach()
+
+    # The demo and the settlement tool must be reproducible in CI: they assert
+    # exact figures, so a regression in the ledger fails the job.
+    add_test(NAME charger_demo_runs COMMAND charger_demo --brief)
+    add_test(NAME charger_settle_usage COMMAND charger_settle)
+    set_tests_properties(charger_settle_usage PROPERTIES WILL_FAIL TRUE)
 endif()
 
 if(CHARGER_BUILD_FUZZ)
