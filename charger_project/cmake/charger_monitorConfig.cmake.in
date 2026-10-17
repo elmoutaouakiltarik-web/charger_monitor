@@ -1,0 +1,13 @@
+@PACKAGE_INIT@
+
+# Consumers link charger::core. The library has no external dependencies.
+# The export namespace is charger:: and EXPORT_NAME is core, so the imported
+# target is charger::core.
+include("${CMAKE_CURRENT_LIST_DIR}/chargerTargets.cmake")
+
+check_required_components(charger_monitor)
+
+# The demo executable is optional: it exists only when it was built.
+if(TARGET charger_monitor)
+    set(charger_monitor_HAS_CLI ON)
+endif()

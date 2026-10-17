@@ -1,0 +1,66 @@
+name: Bug report
+description: Something behaves differently from the documented contract
+labels: bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project is a monitoring library. It does not control hardware.
+        If you are looking for a fault reset or a control command, this is the
+        wrong repository.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The observed behaviour, including the exact output.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What the README or the schema says should happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: |
+        Minimal input. For a replay issue, the exact lines fed to --replay.
+        For a config issue, the smallest JSON that fails.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: charger_monitor version
+      placeholder: "charger_monitor --version"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Ledger / energy / pricing
+        - Journal / recovery / tamper detection
+        - State machine / fault handling
+        - Diagnostics
+        - Config file
+        - Build / packaging / find_package
+        - Documentation
+    validations:
+      required: true
+
+  - type: input
+    id: toolchain
+    attributes:
+      label: Compiler and platform
+      placeholder: "g++ 13 on Ubuntu 24.04"

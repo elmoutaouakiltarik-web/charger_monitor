@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "configurePresets": [
+    {
+      "name": "default",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "ci",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build-ci",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "CHARGER_WERROR": "ON" }
+    },
+    {
+      "name": "asan",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build-asan",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "CHARGER_SANITIZERS": "ON" }
+    },
+    {
+      "name": "fuzz",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build-fuzz",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CHARGER_BUILD_FUZZ": "ON",
+        "CHARGER_SANITIZERS": "ON"
+      }
+    }
+  ]
+}

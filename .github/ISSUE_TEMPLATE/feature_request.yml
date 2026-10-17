@@ -1,0 +1,44 @@
+name: Feature request
+description: Propose a capability that has real operational value
+labels: enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please justify the request in operational or economic terms, not in
+        feature-list terms. The strongest requests state what an operator
+        would otherwise do manually, and what it costs today.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The operational problem
+      description: What cannot be done today, and what it costs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+    validations:
+      required: true
+
+  - type: dropdown
+    id: compatibility
+    attributes:
+      label: Does this change a published schema or the public API?
+      options:
+        - "No, purely additive"
+        - "Yes, it would break a consumer"
+    validations:
+      required: true
+
+  - type: textarea
+    id: schema
+    attributes:
+      label: If yes, migration path
+      description: |
+        The schemas charger.snapshot.v1, charger.session.v1, charger.ledger.v1,
+        charger.portfolio.v1 and charger.config.v1 are a compatibility contract.
+        A breaking change needs a major version and a migration note.

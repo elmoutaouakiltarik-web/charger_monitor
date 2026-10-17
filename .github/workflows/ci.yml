@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    name: build (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
+    defaults:
+      run:
+        working-directory: charger_project
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=${{ matrix.compiler }} -DCHARGER_WERROR=ON
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: End-to-end replay
+        run: bash scripts/e2e_replay.sh
+      - name: Consumable package (find_package)
+        run: bash scripts/consume_test.sh
+      - name: Journal tamper detection
+        run: |
+          # An audit of the journal: a tamper must fail the job.
+          tmp="$(mktemp)"
+          printf '180#80BBE80300000000\n181#01\n181#02\n181#00\n' \
+            | ./build/charger_monitor --replay --journal "$tmp" --replay-interval-ms 1000 >/dev/null 2>&1
+          ./build/charger_monitor --verify-journal --journal "$tmp"
+          awk 'NR==1{sub(/\t/, "\t9\t")} {print}' "$tmp" > "$tmp.bad"
+          if ./build/charger_monitor --verify-journal --journal "$tmp.bad"; then
+            echo "CI FAIL: tampered journal accepted" >&2
+            exit 1
+          fi
+          rm -f "$tmp" "$tmp.bad"
+
+  sanitizers:
+    name: build (asan+ubsan)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: charger_project
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build-san -DCMAKE_BUILD_TYPE=Debug -DCHARGER_SANITIZERS=ON
+      - name: Build
+        run: cmake --build build-san --parallel
+      - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+        run: ctest --test-dir build-san --output-on-failure
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: charger_project
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure with coverage
+        run: >-
+          cmake -S . -B build-cov -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_FLAGS="--coverage -O0"
+          -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+      - name: Build
+        run: cmake --build build-cov --parallel
+      - name: Test under coverage
+        run: ctest --test-dir build-cov --output-on-failure
+      - name: Report
+        run: |
+          gcovr --root . --filter 'src/' --exclude-unreachable-branches \
+                --print-summary --xml coverage.xml --html-details coverage.html
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: charger_project/build-cov/coverage.*
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: coverage-report-on-failure
+          path: charger_project/build-cov/coverage.*
+
+  fuzz:
+    name: fuzz (libFuzzer, 20s)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: charger_project
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang and gcovr
+        run: sudo apt-get update && sudo apt-get install -y clang gcovr
+      - name: Configure
+        run: cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=clang++ -DCHARGER_BUILD_FUZZ=ON -DCHARGER_SANITIZERS=ON
+      - name: Build
+        run: cmake --build build-fuzz --parallel
+      - name: Fuzz
+        run: |
+          ./build-fuzz/charger_fuzz -max_total_time=20 -rss_limit_mb=2048
+        # Fallisce se libFuzzer trova crash/UB/leak: il corpus polveriza anche i percorsi di reset
+
+  format:
+    name: clang-format
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format
+        run: sudo apt-get update && sudo apt-get install -y clang-format
+      - name: Check formatting
+        run: |
+          cd charger_project
+          clang-format --dry-run --Werror src/*.cpp tests/*.cpp include/*.hpp

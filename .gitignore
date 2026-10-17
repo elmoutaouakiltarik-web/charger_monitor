@@ -1,0 +1,27 @@
+# Build trees
+build/
+build-*/
+cmake-build-*/
+out/
+
+# Install trees
+install/
+prefix/
+
+# Journals, session logs and reports produced at runtime. These are billing
+# records: they must never be committed.
+*.journal
+*.jsonl
+charger_fuzz.tmpjournal
+
+# Editor and tooling
+.vscode/
+.idea/
+.cache/
+compile_commands.json
+*.swp
+*~
+
+# OS noise
+.DS_Store
+Thumbs.db

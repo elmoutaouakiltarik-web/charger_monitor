@@ -1,0 +1,11 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: charger_monitor
+Description: Deterministic DC charger bay monitor with an exact session ledger, durable hash-chained journal and fleet rollup
+URL: https://github.com/OWNER/charger_monitor
+Version: @PROJECT_VERSION@
+Cflags: -I${includedir}
+Libs: -L${libdir} -lcharger_core

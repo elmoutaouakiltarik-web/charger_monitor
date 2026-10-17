@@ -1,0 +1,41 @@
+{
+  "schema": "charger.config.v1",
+  "asset_id": "bay-07",
+  "currency": "EUR",
+
+  "measurement_timeout_ms": 3000,
+  "status_timeout_ms": 3000,
+  "report_interval_ms": 1000,
+  "max_integration_ms": 2000,
+
+  "max_voltage_v": 500.0,
+  "max_current_a": 200.0,
+
+  "protocol": {
+    "measurement_id": 384,
+    "status_id": 385,
+    "voltage_offset": 0,
+    "current_offset": 2,
+    "voltage_scale_den": 100,
+    "current_scale_den": 100,
+    "measurement_length": 8,
+    "little_endian": true
+  },
+
+  "tariff": {
+    "energy_eur_per_kwh": "0.25",
+    "time_eur_per_hour": "3.60",
+    "flat_eur": "0.50",
+    "energy_step_wh": 10,
+    "time_step_s": 60
+  },
+
+  "diagnostics": {
+    "stuck_at_ms": 30000,
+    "max_voltage_rate_mv_per_s": 50000,
+    "max_current_rate_ma_per_s": 200000,
+    "sag_voltage_mv": 460000,
+    "sag_tolerance_mv": 5000,
+    "current_hunt_band_ma": 5000
+  }
+}
