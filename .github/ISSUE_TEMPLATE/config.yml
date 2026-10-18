@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/elmoutaouakiltarik-web/charger_monitor/security/advisories/new
+    about: Report privately. Do not open a public issue for an unfixed vulnerability (see SECURITY.md).
+  - name: Field guide and operations
+    url: https://github.com/elmoutaouakiltarik-web/charger_monitor/blob/master/docs/OPERATIONS.md
+    about: Commissioning, deployment, Prometheus, anchors and disputes are covered here first.
