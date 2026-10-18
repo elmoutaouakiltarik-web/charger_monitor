@@ -13,16 +13,30 @@
 //                                            (charger.dispute.v1 JSON)
 //   charger_settle <journal> --cdr ASSET SESSION_ID
 //                                            OCPI CDR subset (charger.cdr.v1 JSON)
+//   charger_settle <journal> --metrics [--out FILE.prom]
+//                                            fleet rollup as Prometheus text (charger_portfolio_*,
+//                                            charger_asset_*); --out replaces FILE atomically, so it can
+//                                            feed the node_exporter textfile collector from cron
+//   charger_settle <journal> --ocpp ASSET SESSION_ID [--out FILE]
+//                                            the Started/Ended OCPP 2.0.1 TransactionEvent payloads for one
+//                                            session (charger.ocpp-events.v1; a file export, no transport)
+//   charger_settle <journal> --reconcile METER.csv --tolerance-ppm N [--out FILE.csv] [--summary]
+//                                            second opinion: compare session energy with an independent
+//                                            meter's export (asset_id,session_id,meter_wh). The tolerance is
+//                                            REQUIRED: the tool never invents a threshold
 //   charger_settle <journal> --check-tou tou.json
 //                                            validate a TOU tariff file and its 24 h coverage
 //   charger_settle <journal> --tou-settle tou.json [--summary] [--out FILE]
 //                                            exact ledger CSV plus a TOU *estimate* column
 //                                            (constant-power apportionment, labelled, never the invoice)
 //
-// Exit codes: 0 settled, 2 usage or verification error, 3 journal altered.
+// Exit codes: 0 settled, 2 usage or verification error, 3 journal altered, 4 reconciliation found drift.
 
+#include <charger_export.hpp>
 #include <charger_ledger.hpp>
 #include <charger_monitor.hpp>
+#include <charger_ocpp.hpp>
+#include <charger_reconcile.hpp>
 #include <charger_tou.hpp>
 
 #include <cstdio>
@@ -41,6 +55,7 @@ struct Options {
     std::string out;
     bool summary{false};
     bool verify_only{false};
+    bool metrics{false};
     // Dispute pack: --dispute ASSET SESSION_ID.
     bool dispute{false};
     std::string dispute_asset;
@@ -49,6 +64,14 @@ struct Options {
     bool cdr{false};
     std::string cdr_asset;
     std::uint64_t cdr_session{0};
+    // OCPP 2.0.1 TransactionEvent export: --ocpp ASSET SESSION_ID.
+    bool ocpp{false};
+    std::string ocpp_asset;
+    std::uint64_t ocpp_session{0};
+    // Reconciliation against an independent meter: --reconcile FILE --tolerance-ppm N.
+    std::string reconcile;
+    bool tolerance_set{false};
+    std::uint64_t tolerance_ppm{0};
     // TOU tariff file: --check-tou FILE validates only; --tou-settle FILE adds
     // the estimate column to the settlement CSV.
     std::string check_tou;
@@ -66,6 +89,21 @@ bool parse_u64(const std::string& s, std::uint64_t& out) {
     return true;
 }
 
+// Digits only, no overflow: a tolerance that wrapped around would silently
+// change which sessions count as drift.
+bool parse_ppm(const std::string& s, std::uint64_t& out) {
+    if (s.empty()) return false;
+    std::uint64_t v = 0;
+    for (char c : s) {
+        if (c < '0' || c > '9') return false;
+        const auto d = static_cast<std::uint64_t>(c - '0');
+        if (v > (0xffffffffffffffffull - d) / 10) return false;
+        v = v * 10 + d;
+    }
+    out = v;
+    return true;
+}
+
 bool parse_args(int argc, char** argv, Options& opt, std::string& err) {
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -73,6 +111,8 @@ bool parse_args(int argc, char** argv, Options& opt, std::string& err) {
             opt.summary = true;
         } else if (a == "--verify-only") {
             opt.verify_only = true;
+        } else if (a == "--metrics") {
+            opt.metrics = true;
         } else if (a == "--dispute") {
             opt.dispute = true;
             if (i + 2 >= argc) {
@@ -95,6 +135,30 @@ bool parse_args(int argc, char** argv, Options& opt, std::string& err) {
                 err = "the session id must be a non-negative integer";
                 return false;
             }
+        } else if (a == "--ocpp") {
+            opt.ocpp = true;
+            if (i + 2 >= argc) {
+                err = "--ocpp needs ASSET SESSION_ID, e.g. --ocpp bay-07 12";
+                return false;
+            }
+            opt.ocpp_asset = argv[++i];
+            if (!parse_u64(argv[++i], opt.ocpp_session)) {
+                err = "the session id must be a non-negative integer";
+                return false;
+            }
+        } else if (a == "--reconcile") {
+            if (i + 1 >= argc) {
+                err = "--reconcile needs a meter CSV (asset_id,session_id,meter_wh)";
+                return false;
+            }
+            opt.reconcile = argv[++i];
+        } else if (a == "--tolerance-ppm") {
+            if (i + 1 >= argc || !parse_ppm(argv[i + 1], opt.tolerance_ppm)) {
+                err = "--tolerance-ppm needs a non-negative integer (parts per million)";
+                return false;
+            }
+            ++i;
+            opt.tolerance_set = true;
         } else if (a == "--check-tou") {
             if (i + 1 >= argc) {
                 err = "--check-tou needs a tariff file";
@@ -127,6 +191,20 @@ bool parse_args(int argc, char** argv, Options& opt, std::string& err) {
         err = "a journal path is required";
         return false;
     }
+    if (!opt.reconcile.empty() && !opt.tolerance_set) {
+        err =
+            "--reconcile needs --tolerance-ppm N: the tolerance is yours to set from your instruments and your "
+            "contract, and this tool never invents one";
+        return false;
+    }
+    if (opt.tolerance_set && opt.reconcile.empty()) {
+        err = "--tolerance-ppm only applies to --reconcile";
+        return false;
+    }
+    if (opt.ocpp && !opt.reconcile.empty()) {
+        err = "--ocpp and --reconcile cannot be combined";
+        return false;
+    }
     return true;
 }
 
@@ -152,8 +230,7 @@ std::string csv_escape(const std::string& s) {
 // a misread clock would silently move energy into the wrong window.
 bool parse_close_utc(const std::string& s, std::int64_t& epoch) {
     int Y = 0, M = 0, D = 0, h = 0, m = 0, sec = 0;
-    if (s.size() != 20 || s[4] != '-' || s[7] != '-' || s[10] != 'T' || s[13] != ':' || s[16] != ':' ||
-        s[19] != 'Z') {
+    if (s.size() != 20 || s[4] != '-' || s[7] != '-' || s[10] != 'T' || s[13] != ':' || s[16] != ':' || s[19] != 'Z') {
         return false;
     }
     const auto digits = [&](std::size_t pos, std::size_t n, int& out) {
@@ -219,8 +296,7 @@ bool tou_estimate_session(const TimeOfUse& tou, const SettledSession& s, std::in
     const std::int64_t total = static_cast<std::int64_t>(s.record.energy_uwh);
     const std::vector<TimeSample> samples{{0, 0, start_sod}, {dur_s * 1000, total, close_sod}};
     std::string perr;
-    const auto r =
-        price_time_of_use_strict(tou, samples, s.record.flat_cost_micro_eur, 1, 1, perr);
+    const auto r = price_time_of_use_strict(tou, samples, s.record.flat_cost_micro_eur, 1, 1, perr);
     if (!r) {
         reason = perr;
         return false;
@@ -241,11 +317,16 @@ int main(int argc, char** argv) {
     Options opt;
     std::string err;
     if (!parse_args(argc, argv, opt, err)) {
-        std::cerr << err << "\nUsage: charger_settle <journal> [--summary] [--verify-only] [--out FILE]\n"
-                  << "       charger_settle <journal> --dispute ASSET SESSION_ID\n"
-                  << "       charger_settle <journal> --cdr ASSET SESSION_ID\n"
-                  << "       charger_settle <journal> --check-tou tou.json\n"
-                  << "       charger_settle <journal> --tou-settle tou.json [--summary] [--out FILE]\n";
+        std::cerr
+            << err << "\nUsage: charger_settle <journal> [--summary] [--verify-only] [--out FILE]\n"
+            << "       charger_settle <journal> --dispute ASSET SESSION_ID\n"
+            << "       charger_settle <journal> --cdr ASSET SESSION_ID\n"
+            << "       charger_settle <journal> --metrics [--out FILE.prom]\n"
+            << "       charger_settle <journal> --ocpp ASSET SESSION_ID [--out FILE]\n"
+            << "       charger_settle <journal> --reconcile METER.csv --tolerance-ppm N [--out FILE.csv] [--summary]\n"
+            << "         (the tolerance is required: this tool never invents a threshold)\n"
+            << "       charger_settle <journal> --check-tou tou.json\n"
+            << "       charger_settle <journal> --tou-settle tou.json [--summary] [--out FILE]\n";
         return 2;
     }
 
@@ -300,8 +381,7 @@ int main(int argc, char** argv) {
             }
         }
         if (found == nullptr) {
-            std::cerr << "no closed session " << opt.cdr_asset << " #" << opt.cdr_session
-                      << " in a verified journal\n";
+            std::cerr << "no closed session " << opt.cdr_asset << " #" << opt.cdr_session << " in a verified journal\n";
             return 2;
         }
         const std::string cdr = json_cdr(*found);
@@ -316,6 +396,83 @@ int main(int argc, char** argv) {
             fout << cdr << '\n';
         }
         return 0;
+    }
+    if (opt.metrics) {
+        // The chain was verified above, so these gauges describe an intact journal.
+        const auto kpi = led->portfolio();
+        const std::string text = prometheus_portfolio(kpi ? *kpi : PortfolioKpi{});
+        if (opt.out.empty()) {
+            std::cout << text;
+        } else {
+            std::string werr;
+            if (!write_file_atomic(opt.out, text, werr, false)) {
+                std::cerr << "cannot write " << werr << '\n';
+                return 2;
+            }
+        }
+        return 0;
+    }
+    if (opt.ocpp) {
+        const SettledSession* found = nullptr;
+        for (const auto& s : led->sessions()) {
+            if (s.asset_id == opt.ocpp_asset && s.id == opt.ocpp_session) {
+                found = &s;
+                break;
+            }
+        }
+        if (found == nullptr) {
+            std::cerr << "no closed session " << opt.ocpp_asset << " #" << opt.ocpp_session
+                      << " in a verified journal\n";
+            return 2;
+        }
+        std::string oerr;
+        const std::string events = json_ocpp_events(*found, oerr);
+        if (events.empty()) {
+            std::cerr << "cannot export " << opt.ocpp_asset << " #" << opt.ocpp_session << ": " << oerr << '\n';
+            return 2;
+        }
+        if (opt.out.empty()) {
+            std::cout << events << '\n';
+        } else {
+            std::ofstream fout(opt.out, std::ios::binary);
+            if (!fout) {
+                std::cerr << "cannot write " << opt.out << '\n';
+                return 2;
+            }
+            fout << events << '\n';
+        }
+        return 0;
+    }
+    if (!opt.reconcile.empty()) {
+        bool ok = false;
+        const std::string meter_text = read_file_text(opt.reconcile, ok);
+        if (!ok) {
+            std::cerr << "cannot read meter file: " << opt.reconcile << '\n';
+            return 2;
+        }
+        std::string merr;
+        const auto readings = parse_meter_csv(meter_text, merr);
+        if (!readings) {
+            std::cerr << "meter file refused: " << merr << '\n';
+            return 2;
+        }
+        const auto result = reconcile(led->sessions(), *readings, opt.tolerance_ppm);
+        const std::string csv_text = reconcile_csv(result);
+        const std::string summary_text = reconcile_summary_text(result, opt.journal, opt.reconcile);
+        if (!opt.out.empty()) {
+            std::ofstream fout(opt.out, std::ios::binary);
+            if (!fout) {
+                std::cerr << "cannot write " << opt.out << '\n';
+                return 2;
+            }
+            fout << csv_text;
+        } else if (!opt.summary) {
+            std::cout << csv_text;
+        }
+        // Pipelines keep a clean CSV on stdout: the summary goes to stdout only
+        // when it is the product (--summary) or the CSV went to a file.
+        (opt.summary || !opt.out.empty() ? std::cout : std::cerr) << summary_text;
+        return result.summary.drift > 0 ? 4 : 0;
     }
     // Optional TOU estimate layer: validated first, refused if incomplete.
     // The exact ledger CSV stays the invoice of record; the estimate column is
@@ -454,8 +611,9 @@ int main(int argc, char** argv) {
         std::printf("  FLAT                %s EUR\n", eur(flat_cost).c_str());
         std::printf("  invoice total       %s EUR  (excl. VAT)\n", eur(billable_revenue).c_str());
         if (tou != nullptr) {
-            std::printf("  TOU estimates       %llu priced, %llu refused (constant-power apportionment, not invoiced)\n",
-                        (unsigned long long)tou_ok, (unsigned long long)tou_refused);
+            std::printf(
+                "  TOU estimates       %llu priced, %llu refused (constant-power apportionment, not invoiced)\n",
+                (unsigned long long)tou_ok, (unsigned long long)tou_refused);
         }
         if (held > 0) {
             std::printf("\n  held (not invoiced) %s EUR across %llu session(s)\n", eur(held_revenue).c_str(),

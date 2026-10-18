@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use charger_monitor in research or in a product evaluation, please cite it as below."
+title: "charger_monitor: an arithmetically exact, tamper-evident session ledger for industrial DC charger bays"
+type: software
+license: Apache-2.0
+repository-code: "https://github.com/elmoutaouakiltarik-web/charger_monitor"
+version: "1.4.0"
+authors:
+  - family-names: "El Moutaouakil"
+    given-names: "Tarek"
+keywords:
+  - ev-charging
+  - can-bus
+  - metering
+  - audit
+  - hash-chain
+  - ocpi
+  - ocpp

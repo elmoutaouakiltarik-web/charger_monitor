@@ -30,6 +30,10 @@ add_library(charger_core
     src/charger_config.cpp
     src/charger_dbc.cpp
     src/charger_tou.cpp
+    src/charger_export.cpp
+    src/charger_reconcile.cpp
+    src/charger_ocpp.cpp
+    src/charger_candump.cpp
 )
 target_include_directories(charger_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -58,12 +62,38 @@ if(CHARGER_BUILD_TESTS)
     # The test reads tests/fixtures/vendor_bay.dbc, so pin the working directory.
     set_tests_properties(charger_state_machine PROPERTIES
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+    add_executable(charger_export_tests tests/test_export.cpp)
+    target_link_libraries(charger_export_tests PRIVATE charger_core)
+    target_compile_options(charger_export_tests PRIVATE -Wall -Wextra -Wpedantic ${SANFLAGS})
+    target_link_options(charger_export_tests PRIVATE ${SANLINK} -static-libgcc -static-libstdc++)
+    add_test(NAME charger_export COMMAND charger_export_tests)
+
+    # Clean shutdown (INTERRUPTED sessions) and the candump reader/replay. The candump
+    # test replays tests/fixtures/bay_session.candump in-process.
+    foreach(suite shutdown candump)
+        add_executable(charger_${suite}_tests tests/test_${suite}.cpp)
+        target_link_libraries(charger_${suite}_tests PRIVATE charger_core)
+        target_compile_options(charger_${suite}_tests PRIVATE -Wall -Wextra -Wpedantic ${SANFLAGS})
+        target_link_options(charger_${suite}_tests PRIVATE ${SANLINK} -static-libgcc -static-libstdc++)
+    endforeach()
+    add_test(NAME charger_shutdown COMMAND charger_shutdown_tests)
+    add_test(NAME charger_candump COMMAND charger_candump_tests
+             ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/bay_session.candump)
+
+    foreach(suite reconcile ocpp)
+        add_executable(charger_${suite}_tests tests/test_${suite}.cpp)
+        target_link_libraries(charger_${suite}_tests PRIVATE charger_core)
+        target_compile_options(charger_${suite}_tests PRIVATE -Wall -Wextra -Wpedantic ${SANFLAGS})
+        target_link_options(charger_${suite}_tests PRIVATE ${SANLINK} -static-libgcc -static-libstdc++)
+        add_test(NAME charger_${suite} COMMAND charger_${suite}_tests)
+    endforeach()
 endif()
 
 if(CHARGER_BUILD_TOOLS)
     # These are also downstream consumers of charger::core, so they double as a
     # compile-time check that the public headers are self-contained.
-    foreach(tool charger_demo charger_settle charger_bench)
+    foreach(tool charger_demo charger_settle charger_bench charger_synth charger_probe)
         add_executable(${tool} tools/${tool}/main.cpp)
         target_link_libraries(${tool} PRIVATE charger_core)
         target_compile_options(${tool} PRIVATE -Wall -Wextra -Wpedantic ${SANFLAGS})
@@ -75,6 +105,24 @@ if(CHARGER_BUILD_TOOLS)
     add_test(NAME charger_demo_runs COMMAND charger_demo --brief)
     add_test(NAME charger_settle_usage COMMAND charger_settle)
     set_tests_properties(charger_settle_usage PROPERTIES WILL_FAIL TRUE)
+
+    if(CHARGER_BUILD_TESTS)
+        # The commissioning analyser on the candump fixture: facts only, deterministic.
+        add_test(NAME charger_probe COMMAND ${CMAKE_COMMAND}
+                 -DPROBE=$<TARGET_FILE:charger_probe>
+                 -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/bay_session.candump
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/probe_check.cmake)
+    endif()
+
+    if(CHARGER_BUILD_TESTS)
+        # Runs the built synthesiser, then verifies its journal in-process.
+        add_executable(charger_synth_tests tests/test_synth.cpp)
+        target_link_libraries(charger_synth_tests PRIVATE charger_core)
+        target_compile_options(charger_synth_tests PRIVATE -Wall -Wextra -Wpedantic ${SANFLAGS})
+        target_link_options(charger_synth_tests PRIVATE ${SANLINK} -static-libgcc -static-libstdc++)
+        add_dependencies(charger_synth_tests charger_synth)
+        add_test(NAME charger_synth COMMAND charger_synth_tests $<TARGET_FILE:charger_synth>)
+    endif()
 endif()
 
 if(CHARGER_BUILD_FUZZ)
@@ -91,7 +139,9 @@ install(TARGETS charger_core
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(TARGETS charger_monitor RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES include/charger_monitor.hpp include/charger_portfolio.hpp include/charger_ledger.hpp
-        include/charger_config.hpp include/charger_dbc.hpp include/charger_tou.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+        include/charger_config.hpp include/charger_dbc.hpp include/charger_tou.hpp include/charger_export.hpp
+        include/charger_candump.hpp include/charger_reconcile.hpp include/charger_ocpp.hpp
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 # Downstream projects consume the library with find_package(charger_monitor).
 install(EXPORT chargerTargets

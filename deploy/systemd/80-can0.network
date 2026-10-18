@@ -1,0 +1,17 @@
+# systemd-networkd: bring the cabinet CAN segment up in LISTEN-ONLY mode.
+#
+# Listen-only is the hardware-level version of "it never commands the power
+# stage": the controller cannot drive the bus at all, not even to acknowledge a
+# frame. Install as /etc/systemd/network/80-can0.network and
+# `networkctl reload`. The bit rate below is an EXAMPLE: take it from the
+# cabinet's CAN schema, never from this file.
+#
+# Note: some CAN controllers need at least one other node on the bus that
+# acknowledges frames; on a live cabinet that is always the case.
+[Match]
+Name=can0
+
+[CAN]
+BitRate=500K
+ListenOnly=yes
+RestartSec=100ms
