@@ -1,0 +1,75 @@
+# One instance per bay:   systemctl enable --now charger-monitor@bay-07
+#
+#   /etc/charger/bay-07.json   the versioned config (asset_id, tariff, timeouts, diagnostics)
+#   /etc/charger/bay-07.env    CAN_IFACE=can0            (one line; the bus this bay listens on)
+#
+# What this unit guarantees by construction, not by promise:
+#   * the process cannot transmit on anything but a CAN socket it opens read-only
+#     in practice (it never calls write on it), and the interface itself should be
+#     put in listen-only mode (see 80-can0.network);
+#   * it cannot write outside its journal, its status directory and the textfile
+#     directory, cannot gain privileges, cannot map writable+executable memory;
+#   * stdout is discarded: the monitor prints one JSON snapshot per frame there,
+#     which would flood the journal of the host. Supervision uses the status
+#     files, billing uses the journal, events go to stderr (-> journald).
+[Unit]
+Description=charger_monitor bay %i (read-only CAN monitor, exact session ledger)
+Documentation=https://github.com/elmoutaouakiltarik-web/charger_monitor/blob/master/docs/OPERATIONS.md
+After=network-online.target
+ConditionPathExists=/etc/charger/%i.json
+ConditionPathExists=/etc/charger/%i.env
+
+[Service]
+Type=simple
+User=charger
+Group=charger
+EnvironmentFile=/etc/charger/%i.env
+# /var/lib/charger holds the journals: the billing system of record. Back it up.
+StateDirectory=charger
+StateDirectoryMode=0750
+# /run/charger/status is tmpfs: a status file rewritten every second must not wear flash.
+RuntimeDirectory=charger charger/status
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+UMask=0027
+ExecStart=/usr/local/bin/charger_monitor ${CAN_IFACE} \
+    --config /etc/charger/%i.json \
+    --journal /var/lib/charger/%i.journal \
+    --snapshot-file /run/charger/status/%i.json \
+    --metrics-file /var/lib/node_exporter/textfile/charger-%i.prom
+StandardOutput=null
+StandardError=journal
+# The journal is replayed on start; a bay that restarts must come back by itself.
+Restart=always
+RestartSec=2
+TimeoutStopSec=10
+
+# --- sandbox -------------------------------------------------------------
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+ReadWritePaths=/var/lib/charger /run/charger -/var/lib/node_exporter/textfile
+RestrictAddressFamilies=AF_CAN AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+[Install]
+WantedBy=multi-user.target

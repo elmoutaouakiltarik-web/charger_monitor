@@ -1,0 +1,89 @@
+# Example alert rules for the node_exporter textfile metrics written by
+#   charger_monitor --metrics-file /var/lib/node_exporter/textfile/charger-<bay>.prom
+#
+# Every number here is a PLACEHOLDER for a site parameter (your SLA, your
+# cabinet's timeouts, your maintenance window). The library ships diagnostics
+# disabled for the same reason: thresholds come from your electrical data, not
+# from us. `charger_state`, `*_stale`, `charger_export_timestamp_seconds` and the
+# counters are facts reported by the monitor; the `for:` durations and the 0.95
+# availability target are examples to edit.
+#
+# Check before loading:   promtool check rules deploy/prometheus/charger-alerts.yml
+groups:
+  - name: charger-monitor
+    rules:
+      # node_exporter serves the LAST file forever when the monitor dies, so the
+      # values alone cannot tell you. The render time can.
+      - alert: ChargerMonitorNotWriting
+        expr: time() - charger_export_timestamp_seconds > 30
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "charger_monitor for {{ $labels.asset }} has stopped rewriting its metrics file"
+          description: "The file is older than 30 s: the monitor or its host is down, and every other value on this bay is frozen."
+
+      - alert: ChargerTextfileScrapeError
+        expr: node_textfile_scrape_error == 1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "node_exporter rejected a textfile (parse error or duplicate series)"
+
+      - alert: ChargerFault
+        expr: charger_state{state="FAULT"} == 1
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.asset }} is in FAULT"
+          description: "A fault stays latched until an authorized, independent procedure clears it. The monitor never resets it."
+
+      - alert: ChargerBusSilent
+        expr: charger_measurements_stale == 1 or charger_status_stale == 1
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.asset }}: a CAN stream is older than its timeout"
+          description: "Sessions interrupted by this are held for review, never interpolated."
+
+      - alert: ChargerChargingWithoutPower
+        expr: charger_state{state="CHARGING"} == 1 and on(asset) charger_measurement_power_watts == 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.asset }} reports CHARGING but delivers 0 W"
+
+      - alert: ChargerMeasurementGap
+        expr: increase(charger_integration_gaps_total[1h]) > 0
+        labels: {severity: info}
+        annotations:
+          summary: "{{ $labels.asset }}: energy was NOT integrated across a measurement gap in the last hour"
+          description: "The affected session is flagged energy_lower_bound and held for review."
+
+      - alert: ChargerHeldSessions
+        expr: increase(charger_sessions_closed_total[1d]) - increase(charger_sessions_billable_total[1d]) > 0
+        labels: {severity: info}
+        annotations:
+          summary: "{{ $labels.asset }}: sessions closed in the last day that are held for review rather than invoiced"
+
+      - alert: ChargerFramesRejected
+        expr: rate(charger_frames_rejected_total[5m]) > 0
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.asset }} keeps receiving frames it rejects (out of range, wrong layout or reserved bytes)"
+
+      - alert: ChargerDiagnosticActive
+        expr: charger_diagnostic_active == 1
+        for: 5m
+        labels: {severity: info}
+        annotations:
+          summary: "{{ $labels.asset }}: advisory {{ $labels.diagnostic }} is active"
+          description: "An advisory never blocks charging. It is a prompt to look at the connector, sensor or wiring."
+
+      - alert: ChargerAvailabilityBelowTarget
+        # EXAMPLE VALUE. Set the target from your own SLA; an undefined ratio is omitted, not zero.
+        expr: charger_availability_ratio < 0.95
+        for: 30m
+        labels: {severity: info}
+        annotations:
+          summary: "{{ $labels.asset }} availability is below the example target"

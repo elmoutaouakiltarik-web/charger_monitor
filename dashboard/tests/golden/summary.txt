@@ -1,0 +1,14 @@
+
+Settlement summary (journal dashboard/data/demo.journal, chain verified)
+  sessions closed      191
+  invoice now         170
+  held for review     21  (1 orphan: process died mid-session)
+
+  billable energy      4275859 Wh
+  ENERGY              1710.644000 EUR
+  TIME                226.000000 EUR
+  FLAT                85.000000 EUR
+  invoice total       2021.644000 EUR  (excl. VAT)
+
+  held (not invoiced) 115.152000 EUR across 21 session(s)
+  reason: gaps, timeout, orphan or undersampled — see the CSV quality column

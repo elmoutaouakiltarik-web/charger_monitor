@@ -10,7 +10,6 @@ Outputs into docs/:
     architecture.png     component map of the library and its tools
     session-lifecycle.png  state machine and the billing gate
     exactness.png        integer vs double accumulator, measured values
-    fleet-kpi.png        what the operator sees per bay over time
 
 Requires Pillow only. The palette matches the dark theme of GitHub.
 
@@ -135,11 +134,11 @@ def social_preview(path):
 
     d.text((64, 56), "charger_monitor", font=f_title, fill=TEXT)
     d.text((64, 128),
-           "Exact charging-session ledger for industrial DC charger bays",
+           "Exact session ledger and an offline control room for DC charger bays",
            font=f_sub, fill=MUTED)
 
     # left panel: the invariant
-    d.rounded_rectangle([64, 200, 604, 470], radius=12, fill=PANEL, outline=BORDER, width=1)
+    d.rounded_rectangle([64, 200, 604, 500], radius=12, fill=PANEL, outline=BORDER, width=1)
     d.text((92, 224), "THE INVARIANT", font=f_head, fill=GREEN)
     d.text((92, 264), "480 V * 10 A * 1 h", font=f_mono, fill=TEXT)
     d.text((92, 298), "=  exactly 4800 Wh", font=f_mono, fill=GREEN)
@@ -148,7 +147,7 @@ def social_preview(path):
 
     # right panel: what it guarantees
     rx = 648
-    d.rounded_rectangle([rx, 200, W - 64, 470], radius=12, fill=PANEL, outline=BORDER, width=1)
+    d.rounded_rectangle([rx, 200, W - 64, 500], radius=12, fill=PANEL, outline=BORDER, width=1)
     d.text((rx + 28, 224), "GUARANTEED", font=f_head, fill=GREEN)
     rows = [
         ("dropouts", "never become invented energy"),
@@ -156,22 +155,39 @@ def social_preview(path):
         ("invoices", "billing_complete gates automation"),
         ("disputes", "meter + tariff + chain in one JSON"),
         ("OEM fleet", "vendor DBC rewires the decode safely"),
+        ("auditors", "re-verify in a browser, offline, in 1 click"),
     ]
     y = 264
     for head, body in rows:
         d.text((rx + 28, y), head, font=f_body, fill=FAINT)
         d.text((rx + 128, y), body, font=f_body, fill=TEXT)
-        y += 40
+        y += 36
 
     d.text((64, H - 56),
-           "C++17  ·  zero dependencies  ·  OCPI subset  ·  OCPP-mappable  ·  Apache-2.0",
+           "C++17  ·  zero dependencies  ·  read-only  ·  Prometheus  ·  OCPI/OCPP-mappable  ·  Apache-2.0",
            font=f_sub, fill=MUTED)
     return img, (W, H)
 
 
 # ---------------------------------------------------------------- architecture
+def arrow_down(d, x, y0, y1, colour=None):
+    colour = colour or BORDER
+    d.line([x, y0, x, y1 - 8], fill=colour, width=2)
+    d.polygon([(x - 6, y1 - 10), (x + 6, y1 - 10), (x, y1)], fill=colour)
+
+
+def box(d, rect, title, lines, title_colour, f_box, f_small, outline=BORDER, fill=PANEL, width=1):
+    x0, y0, x1, y1 = rect
+    d.rounded_rectangle(rect, radius=10, fill=fill, outline=outline, width=width)
+    d.text((x0 + 18, y0 + 14), title, font=f_box, fill=title_colour)
+    yy = y0 + 42
+    for line in lines:
+        d.text((x0 + 18, yy), line, font=f_small, fill=MUTED)
+        yy += 21
+
+
 def architecture(path):
-    W, H = 1280, 720
+    W, H = 1280, 860
     img, d = canvas(W, H, top_accent=BLUE)
     f_h1 = font(28, "bold")
     f_box = font(17, "bold")
@@ -180,56 +196,64 @@ def architecture(path):
     f_mono = font(15, "mono")
 
     d.text((64, 46), "How the pieces fit", font=f_h1, fill=TEXT)
-    d.text((64, 84), "CAN frames go in; an exact, verified ledger comes out.", font=f_body, fill=MUTED)
-
-    # input row: two panels
-    d.rounded_rectangle([64, 140, 564, 250], radius=10, fill=PANEL, outline=BORDER, width=1)
-    d.text((88, 160), "CAN bus / vendor DBC", font=f_box, fill=TEXT)
-    d.text((88, 186), "SocketCAN live, or a .dbc file that rewires the wire layout exactly",
-           font=f_small, fill=MUTED)
-    d.text((88, 210), "decode validated bit-exactly against cantools 45.x", font=f_small, fill=FAINT)
-
-    d.rounded_rectangle([636, 140, 1216, 250], radius=10, fill=PANEL, outline=BORDER, width=1)
-    d.text((660, 160), "Config + tariff", font=f_box, fill=TEXT)
-    d.text((660, 186), "versioned JSON; malformed or misspelled fields abort startup,",
-           font=f_small, fill=MUTED)
-    d.text((660, 210), "because silent zero pricing is the bug nobody notices", font=f_small, fill=FAINT)
-
-    # arrows into core
-    for x in (314, 926):
-        d.line([x, 250, x, 306], fill=BORDER, width=2)
-        d.polygon([(x - 6, 296), (x + 6, 296), (x, 306)], fill=BORDER)
-
-    # core
-    d.rounded_rectangle([264, 306, 1016, 430], radius=12, fill=PANEL_ALT, outline=BLUE, width=2)
-    d.text((296, 328), "charger_core  (C++17, no dependencies)", font=f_box, fill=BLUE)
-    d.text((296, 358), "state machine  ·  exact trapezoid integration (128-bit)  ·  OCPI pricing",
-           font=f_mono, fill=TEXT)
-    d.text((296, 386), "predictive diagnostics (advisory, never blocking)  ·  deterministic, clock-injected",
+    d.text((64, 84), "CAN frames go in; an exact, verified record comes out and is read by people and systems that cannot change it.",
            font=f_body, fill=MUTED)
 
-    # three outputs
-    outs = [
-        (64,  "charger_ledger.hpp",   "hash-chained journal, fsync per line,\nrecovery, orphans, tamper detection"),
-        (492, "charger_portfolio.hpp", "fleet rollup rebuilt from the journal\nalone: revenue, energy, ranking"),
-        (920, "charger_settle --dispute", "meter + tariff of record + calculation\n+ chain provenance in one pack"),
-    ]
-    for x, title, body in outs:
-        d.line([x + 250 if x != 920 else x + 148, 430, x + 250 if x != 920 else x + 148, 478],
-               fill=BORDER, width=2)
-        d.polygon([(x + 244 if x != 920 else x + 142, 468), (x + 256 if x != 920 else x + 154, 468),
-                   (x + 250 if x != 920 else x + 148, 478)], fill=BORDER)
-        d.rounded_rectangle([x, 478, x + 348, 606], radius=10, fill=PANEL, outline=BORDER, width=1)
-        d.text((x + 20, 494), title, font=f_box, fill=BLUE)
-        yy = 524
-        for line in body.split("\n"):
-            d.text((x + 20, yy), line, font=f_small, fill=MUTED)
-            yy += 22
+    # row 1: inputs
+    cols = [64, 457, 850]
+    w = 366
+    box(d, [cols[0], 126, cols[0] + w, 236], "CAN bus  (listen-only)",
+        ["SocketCAN live on the cabinet segment;", "the interface cannot even acknowledge a frame,", "so it can never drive the bus"],
+        TEXT, f_box, f_small)
+    box(d, [cols[1], 126, cols[1] + w, 236], "Recording  (candump -L)",
+        ["replay a field capture with its REAL timing", "and recorded UTC; charger_probe measures the", "frame periods before you choose a timeout"],
+        TEXT, f_box, f_small)
+    box(d, [cols[2], 126, cols[2] + w, 236], "Config + tariff + vendor .dbc",
+        ["versioned JSON: a misspelled field aborts", "startup; the OEM database rewires the decode", "exactly, validated bit for bit vs cantools"],
+        TEXT, f_box, f_small)
+    for x in (cols[0] + w // 2, cols[1] + w // 2, cols[2] + w // 2):
+        arrow_down(d, x, 236, 282)
 
-    # tools footer
-    d.rounded_rectangle([64, 628, 1216, 694], radius=10, fill=PANEL, outline=BORDER, width=1)
-    d.text((88, 644), "CLI tools", font=f_box, fill=TEXT)
-    d.text((230, 646), "charger_demo  ·  charger_settle (CSV, dispute pack)  ·  doorstep", font=f_small, fill=MUTED)
+    # core
+    d.rounded_rectangle([64, 282, 1216, 392], radius=12, fill=PANEL_ALT, outline=BLUE, width=2)
+    d.text((92, 300), "charger_core   C++17, zero dependencies, deterministic, clock-injected", font=f_box, fill=BLUE)
+    d.text((92, 332), "state machine  \u00b7  trapezoid integration in 128-bit integers  \u00b7  OCPI ENERGY/TIME/FLAT pricing", font=f_mono, fill=TEXT)
+    d.text((92, 360), "never interpolates a dropout  \u00b7  predictive diagnostics (advisory, never blocking)  \u00b7  it never commands the power stage",
+           font=f_body, fill=MUTED)
+    for x in (cols[0] + w // 2, cols[1] + w // 2, cols[2] + w // 2):
+        arrow_down(d, x, 392, 438)
+
+    # row 3: artefacts
+    box(d, [cols[0], 438, cols[0] + w, 548], "Journal  (billing record)",
+        ["append-only, SHA-256 chained, fsync per line,", "crash recovery, orphans reported, tariff of record", "in every close line, external anchors"],
+        GREEN, f_box, f_small, outline=GREEN, width=2)
+    box(d, [cols[1], 438, cols[1] + w, 548], "Status files  (atomic, no socket)",
+        ["JSON snapshot every report interval, even when", "the bus is silent; Prometheus text with the render", "time, so a dead monitor is visible"],
+        BLUE, f_box, f_small)
+    box(d, [cols[2], 438, cols[2] + w, 548], "Fleet roll-up",
+        ["rebuilt from a journal alone: value, energy,", "held share, fault and timeout stops per bay;", "unknown stays unknown, never zero"],
+        BLUE, f_box, f_small)
+    for x in (cols[0] + w // 2, cols[1] + w // 2, cols[2] + w // 2):
+        arrow_down(d, x, 548, 594)
+
+    # row 4: consumers
+    cw = 270
+    xs = [64, 64 + cw + 24, 64 + 2 * (cw + 24), 64 + 3 * (cw + 24)]
+    consumers = [
+        ("Control Room", ["one offline HTML file: verifies the", "chain in the browser, recalculates", "every invoice, live bays, anchors"], PURPLE),
+        ("charger_settle", ["CSV settlement, dispute pack, CDR,", "OCPP events, reconcile vs a meter,", "TOU estimate, Prometheus fleet view"], AMBER),
+        ("Prometheus + alerts", ["node_exporter textfile; stale file,", "bus silent, fault, gaps, held sessions", "(example rules ship with the repo)"], AMBER),
+        ("Auditor", ["sha256sum, sed and cut: no binary", "of ours needed to recompute a link", "or to check a time-stamped anchor"], GREEN),
+    ]
+    for x, (title, lines, colour) in zip(xs, consumers):
+        box(d, [x, 594, x + cw, 704], title, lines, colour, f_box, f_small)
+
+    # footer
+    d.rounded_rectangle([64, 736, 1216, 800], radius=10, fill=PANEL, outline=BORDER, width=1)
+    d.text((88, 748), "Two implementations, one answer", font=f_box, fill=TEXT)
+    d.text((88, 774), "the journal rules exist in C++ and, independently, in the dashboard; tests compare them byte for byte on freshly synthesised journals",
+           font=f_small, fill=MUTED)
+    d.text((64, 820), "Read-only end to end: no write path to a charger, a bus or a server.", font=f_small, fill=FAINT)
     return img, (W, H)
 
 
@@ -251,26 +275,27 @@ def session_lifecycle(path):
         colour = AMBER if label == "CHARGING" else (RED if label == "FAULT" else BLUE)
         d.rounded_rectangle([x, y, x + 190, 226], radius=10, fill=PANEL, outline=colour, width=2)
         d.text((x + 42, y + 22), label, font=f_state, fill=colour)
-    # arrows
-    for xa, xb in [(282, 332), (522, 588), (778, 900)]:
+    # arrows, with their labels BELOW the row so nothing touches a box
+    for xa, xb, text in [(282, 332, "both streams fresh"), (522, 588, "status = CHARGING"), (778, 900, "fault latched")]:
         d.line([xa, 193, xb, 193], fill=BORDER, width=2)
         d.polygon([(xb - 8, 187), (xb - 8, 199), (xb, 193)], fill=BORDER)
-    d.text((307, 152), "both streams fresh", font=f_small, fill=FAINT)
-    d.text((543, 152), "status = CHARGING", font=f_small, fill=FAINT)
-    d.text((817, 152), "fault latched", font=f_small, fill=FAINT)
+        tw = d.textlength(text, font=f_small)
+        d.text(((xa + xb) / 2 - tw / 2, 240), text, font=f_small, fill=FAINT)
+        d.line([(xa + xb) / 2, 226, (xa + xb) / 2, 236], fill=BORDER, width=1)
 
-    d.rounded_rectangle([92, 290, 1188, 320], radius=8, fill=PANEL_ALT, outline=BORDER, width=1)
-    d.text((116, 296), "Entering CHARGING opens the session.  Leaving it closes the session with a stop reason.",
-           font=f_body, fill=TEXT)
+    d.rounded_rectangle([92, 280, 1188, 336], radius=8, fill=PANEL_ALT, outline=BORDER, width=1)
+    d.text((116, 288), "Entering CHARGING opens the session. Leaving it closes it with a stop reason:", font=f_small, fill=TEXT)
+    d.text((116, 310), "STATUS_OFF, STATUS_READY, COMMUNICATION_TIMEOUT, a fault code, or MONITOR_SHUTDOWN.", font=f_small, fill=MUTED)
 
     # the gate itself
-    d.rounded_rectangle([92, 350, 1188, 590], radius=12, fill=PANEL, outline=GREEN, width=2)
+    d.rounded_rectangle([92, 350, 1188, 612], radius=12, fill=PANEL, outline=GREEN, width=2)
     d.text((118, 370), "billing_complete = all of", font=f_state, fill=GREEN)
     conds = [
         ("closed cleanly", "the state left CHARGING on purpose, not by a crash mid-session"),
         ("two or more samples", "a single accepted frame cannot define an interval, let alone its energy"),
         ("no integration gap", "any interval beyond max_integration_step adds no energy: it is never interpolated"),
         ("not cut by a timeout", "a COMMUNICATION_TIMEOUT stop yields a time_upper_bound, not a bill"),
+        ("not interrupted", "a monitor shutdown keeps the exact energy so far but holds the session for review"),
     ]
     yy = 406
     for head, body in conds:
@@ -283,7 +308,7 @@ def session_lifecycle(path):
 
 # ---------------------------------------------------------------- exactness
 def exactness(path):
-    W, H = 1180, 620
+    W, H = 1180, 660
     img, d = canvas(W, H, top_accent=BLUE)
     f_h1 = font(28, "bold")
     f_label = font(17, "bold")
@@ -314,78 +339,35 @@ def exactness(path):
         if x0 + 374 + 460 > W - 56:
             pass  # keep the bar inside the right margin
 
-    ty = 420
+    ty = 410
     track_x, track_w = x0, W - 2 * x0
-    d.text((track_x, ty), "ingest throughput", font=f_label, fill=TEXT)
-    d.text((track_x, ty + 22), "a 500 kbit/s CAN bus at 1 Hz delivers about 3500 frames/s",
+    d.text((track_x, ty), "ingest throughput vs what a CAN bus can deliver  (log scale)", font=f_label, fill=TEXT)
+    d.text((track_x, ty + 22), "measured by charger_bench in a Release build on the machine that built these docs "
+                               "(4 vCPU container, GCC 13); run it on yours",
            font=f_small, fill=FAINT)
-    scale_lbl = "scale: 1.2 M frames/s"
-    lw = d.textlength(scale_lbl, font=f_small)
-    d.text((track_x + track_w - lw, ty + 22), scale_lbl, font=f_small, fill=FAINT)
+    import math
+    lo, hi = 3.0, 7.0   # 1e3 .. 1e7 frames/s
 
-    by1, by2 = ty + 48, ty + 70
-    d.rounded_rectangle([track_x, by1, track_x + track_w, by2], radius=4, fill=PANEL_ALT)
-    scale = track_w / 1200000.0
-    d.rounded_rectangle([track_x, by1, track_x + int(1117482 * scale), by2], radius=4, fill=PURPLE)
-    d.text((track_x, by2 + 10), "1 117 142 frames/s  (~895 ns per frame, Release build on the reference machine)",
-           font=f_small, fill=PURPLE)
+    def bar(y, value, colour, label):
+        frac = (math.log10(value) - lo) / (hi - lo)
+        end = track_x + int(track_w * frac)
+        d.rounded_rectangle([track_x, y, track_x + track_w, y + 22], radius=4, fill=PANEL_ALT)
+        d.rounded_rectangle([track_x, y, end, y + 22], radius=4, fill=colour)
+        tw = d.textlength(label, font=f_small)
+        if tw + 20 < end - track_x:
+            d.text((track_x + 10, y + 3), label, font=f_small, fill=BG)   # inside the bar
+        else:
+            d.text((end + 10, y + 3), label, font=f_small, fill=TEXT)     # beside it
 
-    d.text((track_x, ty + 108), "Throughput is not a constraint. Exactness is, and it is structural:",
+    bar(ty + 56, 3500, BLUE, "3 500 frames/s: a 500 kbit/s CAN bus at 1 Hz")
+    bar(ty + 88, 8463432, PURPLE, "8.46 M frames/s ingested   (about 2 400 x the bus)")
+    for k in range(3, 8):
+        gx = track_x + int(track_w * (k - lo) / (hi - lo))
+        d.text((gx - 10, ty + 118), "1e%d" % k, font=f_small, fill=FAINT)
+
+    d.text((track_x, ty + 146), "Throughput is not a constraint. Exactness is, and it is structural: the ledger holds integers,",
            font=f_small, fill=MUTED)
-    d.text((track_x, ty + 128), "the ledger holds integers, so no amount of accumulated rounding moves a Wh boundary.",
-           font=f_small, fill=MUTED)
-    return img, (W, H)
-
-
-# ---------------------------------------------------------------- fleet kpi
-def fleet_kpi(path):
-    W, H = 1180, 560
-    img, d = canvas(W, H, top_accent=PURPLE)
-    f_h1 = font(28, "bold")
-    f_head = font(16, "bold")
-    f_body = font(15)
-    f_small = font(13)
-
-    d.text((64, 40), "What the operator sees", font=f_h1, fill=TEXT)
-    d.text((64, 78), "A held session is invisible nowhere: the reason travels with it.", font=f_body, fill=MUTED)
-
-    d.rounded_rectangle([64, 126, 604, 536], radius=10, fill=PANEL, outline=BORDER, width=1)
-    d.text((88, 146), "Per bay over the shift", font=f_head, fill=TEXT)
-    d.text((88, 176), "asset      status       verdict       energy         cost", font=f_small, fill=FAINT)
-    rows = [
-        ("bay-04", "CHARGING", "billable", "118 Wh", "good", GREEN),
-        ("bay-07", "CHARGING", "billable", "4 800 Wh", "good", GREEN),
-        ("bay-09", "TIMEOUT", "held", "2 250 Wh", "time is an upper bound", AMBER),
-        ("bay-12", "FAULT", "held", "1 380 Wh", "fault kept energy", AMBER),
-        ("bay-15", "ORPHAN", "held", "unknown", "process died mid-session", RED),
-    ]
-    y = 204
-    for asset, status, verdict, energy, note, colour in rows:
-        d.text((88, y), asset, font=f_body, fill=TEXT)
-        d.text((196, y), status, font=f_body, fill=BLUE)
-        d.text((330, y), verdict, font=f_body, fill=colour)
-        d.text((430, y), energy, font=f_body, fill=TEXT)
-        d.text((512, y), note, font=f_small, fill=FAINT)
-        y += 34
-
-    d.rounded_rectangle([648, 126, W - 64, 536], radius=10, fill=PANEL, outline=BORDER, width=1)
-    d.text((672, 146), "Site rollup (rebuilt from the journal alone)", font=f_head, fill=TEXT)
-    kpis = [
-        ("revenue", "1 245.30 EUR", TEXT),
-        ("energy", "4 982 kWh", TEXT),
-        ("invoiced now", "4 711 EUR (93.8%)", GREEN),
-        ("held", "318 EUR across 41 sessions", AMBER),
-        ("availability", "99.2 ppm availability, energy lower bounds excluded", MUTED),
-        ("best bay", "bay-07, highest revenue per hour", TEXT),
-    ]
-    y = 192
-    for k, v, c in kpis:
-        d.text((672, y), k, font=f_body, fill=FAINT)
-        d.text((800, y), v, font=f_body, fill=c)
-        y += 48
-
-    d.text((64, H - 40), "Every figure is an exact integer at the source; the report is a view of that.",
-           font=f_small, fill=MUTED)
+    d.text((track_x, ty + 166), "so no amount of accumulated rounding moves a Wh boundary.", font=f_small, fill=MUTED)
     return img, (W, H)
 
 
@@ -397,7 +379,6 @@ def main():
         ("architecture.png", architecture, BLUE),
         ("session-lifecycle.png", session_lifecycle, AMBER),
         ("exactness.png", exactness, BLUE),
-        ("fleet-kpi.png", fleet_kpi, PURPLE),
     ]
     for name, fn, accent in jobs:
         target = os.path.join(out, name)
