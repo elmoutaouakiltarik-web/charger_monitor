@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>charger_monitor</title>
+<meta name="description" content="An independent, cabinet-side witness for industrial DC charger bays: an arithmetically exact session ledger, a tamper-evident journal and a read-only control room.">
+<style>
+:root{color-scheme:light dark;--bg:#f9f9f7;--s:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--ring:rgba(11,11,11,.12);--blue:#2a78d6}
+@media (prefers-color-scheme:dark){:root{--bg:#0d0d0d;--s:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--ring:rgba(255,255,255,.12);--blue:#3987e5}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:920px;margin:0 auto;padding:48px 16px 72px}
+h1{font-size:34px;margin:0 0 8px;letter-spacing:-.02em}p.lead{font-size:19px;color:var(--ink2);margin:0 0 28px}
+.cta{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 36px}
+a.btn{display:inline-block;padding:11px 18px;border-radius:10px;border:1px solid var(--ring);background:var(--s);color:var(--ink);text-decoration:none;font-weight:600}
+a.btn.primary{background:var(--blue);border-color:var(--blue);color:#fff}
+.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(250px,1fr))}
+.card{background:var(--s);border:1px solid var(--ring);border-radius:12px;padding:14px 16px}
+.card b{display:block;margin-bottom:2px}.card span{color:var(--ink2);font-size:14.5px}
+img{max-width:100%;border-radius:12px;border:1px solid var(--ring);margin:0 0 36px}
+.note{color:var(--ink2);font-size:14px;margin-top:36px}
+</style>
+</head>
+<body>
+<main>
+<h1>charger_monitor</h1>
+<p class="lead">An independent, cabinet-side witness for industrial DC charger bays: an arithmetically exact session ledger, a tamper-evident journal, and a read-only control room that proves it in your browser.</p>
+<div class="cta">
+  <a class="btn primary" href="control-room.html">Open the control room (demo)</a>
+  <a class="btn" href="https://github.com/elmoutaouakiltarik-web/charger_monitor">Source on GitHub</a>
+  <a class="btn" href="https://github.com/elmoutaouakiltarik-web/charger_monitor/blob/master/docs/DASHBOARD.md">Dashboard guide</a>
+  <a class="btn" href="https://github.com/elmoutaouakiltarik-web/charger_monitor/blob/master/docs/OPERATIONS.md">Operations</a>
+</div>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="dashboard-overview-dark.png">
+  <img src="dashboard-overview-light.png" alt="The control room: chain verified, ready-to-invoice total, held sessions, energy per day, value per bay">
+</picture>
+<div class="grid">
+  <div class="card"><b>Nothing leaves your browser</b><span>The journal is read locally; the page makes no external request.</span></div>
+  <div class="card"><b>Independent verification</b><span>A second implementation of the journal rules, tested byte for byte against the C++ tools.</span></div>
+  <div class="card"><b>Exact money, exact energy</b><span>Integers only (µWh, µEUR); the invoice follows from the meter and the tariff of record.</span></div>
+  <div class="card"><b>Cannot touch your plant</b><span>No write path to a charger, a bus or a server. A window, not a remote control.</span></div>
+</div>
+<p class="note">The demo shift is <b>synthetic</b>: produced by the real engine, containing no measurement. Not a legal or fiscal meter; see the compliance notes in the repository.</p>
+</main>
+</body>
+</html>

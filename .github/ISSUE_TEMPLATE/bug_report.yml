@@ -54,6 +54,9 @@ body:
         - State machine / fault handling
         - Diagnostics
         - Config file
+        - Dashboard / control room
+        - Exports (status files, Prometheus, CDR, OCPP, reconcile)
+        - candump replay / probe
         - Build / packaging / find_package
         - Documentation
     validations:
