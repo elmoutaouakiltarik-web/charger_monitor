@@ -34,6 +34,15 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   procedures, parametric revenue/dispute economics without invented tariffs,
   and example TOU files with placeholder rates in
   `charger_project/examples/tou/`.
+- ChainedAnchor session anchor (`charger.anchor.v1`): `ChainedAnchor::to_json()`
+  serialises the journal provenance record (schema, timestamp, digest,
+  previous-anchor hash, signature) into a verifiable JSON document for dispute
+  packs and audit trails.
+- Multi-bay configuration (`charger_config.hpp`): `TimeOfUse::validate()` rejects
+  degenerate, out-of-range or negative-rate windows, and `price_time_of_use()`
+  splits sessions across window boundaries with an exact integer remainder,
+  returning `TimeOfUseResult` with per-window `ChargingPeriod` entries and an
+  `unpriced_ms` hole counter.
 
 ### Documentation
 
