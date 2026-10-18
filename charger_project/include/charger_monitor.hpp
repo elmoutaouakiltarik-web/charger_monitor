@@ -20,6 +20,9 @@ constexpr const char* VERSION = "1.4.0";
 constexpr const char* PROJECT_NAME = "charger_monitor";
 constexpr const char* SNAPSHOT_SCHEMA = "charger.snapshot.v1";
 constexpr const char* SESSION_SCHEMA = "charger.session.v1";
+// stop_reason of a session that was open when the monitor itself was stopped
+// (an update, a restart, a signal). See Monitor::shutdown().
+constexpr const char* STOP_MONITOR_SHUTDOWN = "MONITOR_SHUTDOWN";
 
 using Clock = std::chrono::steady_clock;
 
@@ -247,6 +250,19 @@ class Monitor {
     Event note_transport_error(std::string code);
 
     bool reset_fault(std::string& reason, Clock::time_point now = Clock::now());
+
+    // Planned stop of the monitor. A session that is open at that moment is
+    // closed with stop_reason MONITOR_SHUTDOWN and quality INTERRUPTED, keeping
+    // the energy accepted so far EXACTLY (no energy is invented for the time the
+    // monitor was not looking). The record is energy_lower_bound and is NEVER
+    // billing_complete: it is held for review, and the charge may continue as
+    // the next session after the restart. time_upper_bound stays false (that
+    // flag is for communication timeouts). Without this call a restart leaves an
+    // orphan whose energy is unknown. With no session open it returns no events
+    // and changes nothing; calling it twice is harmless. A crash or a power loss
+    // cannot run it: the open line then has no close and the session is an
+    // orphan, as before.
+    std::vector<Event> shutdown(Clock::time_point now = Clock::now());
 
     const Config& config() const noexcept { return config_; }
 

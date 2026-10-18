@@ -1,3 +1,4 @@
+#include "charger_candump.hpp"
 #include "charger_ledger.hpp"
 #include "charger_monitor.hpp"
 #include "charger_portfolio.hpp"
@@ -26,6 +27,10 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         const auto end = blob.find('\n', begin);
         const auto stop = end == std::string::npos ? blob.size() : end;
         const auto slice = blob.substr(begin, std::min<std::size_t>(stop - begin, 64));
+        // The candump reader sees the same hostile bytes: it must refuse or parse, never crash.
+        if (const auto rec = parse_candump_line(slice)) {
+            static_cast<void>(utc_from_epoch_us(rec->time_us));
+        }
         if (const auto frame = parse_hex_frame(slice, now)) {
             monitor.ingest(*frame);
             if (asset.empty() && monitor.snapshot(now).last_session) asset = "fuzz-bay";

@@ -309,11 +309,16 @@ void Monitor::price(SessionRecord& rec) const {
         rec.quality = "GAPS";
     } else if (rec.energy_uwh == 0) {
         rec.quality = "ZERO_ENERGY";
+    } else if (rec.stop_reason == STOP_MONITOR_SHUTDOWN) {
+        // The monitor was stopped, not the power stage: what it counted is exact,
+        // what happened afterwards is unknown. Never invoiced automatically.
+        rec.quality = "INTERRUPTED";
     } else {
         rec.quality = "OK";
     }
     rec.time_upper_bound = rec.stop_reason == "COMMUNICATION_TIMEOUT";
-    rec.energy_lower_bound = rec.undersampled || rec.integration_gaps > 0 || rec.time_upper_bound;
+    rec.energy_lower_bound =
+        rec.undersampled || rec.integration_gaps > 0 || rec.time_upper_bound || rec.quality == "INTERRUPTED";
     rec.billing_complete = rec.closed && rec.quality == "OK" && !rec.time_upper_bound;
 
     // The overflow guard must precede the narrowing cast: converting a uint64_t
@@ -407,6 +412,14 @@ Event Monitor::close_session(Clock::time_point now, const std::string& reason) {
         << format_fixed_point(open_.total_cost_micro_eur, kMicroPerEuro) << ' ' << config_.currency
         << " excluding VAT, reason " << reason << ", quality " << open_.quality;
     return {EventLevel::Info, "SESSION_CLOSED", msg.str()};
+}
+
+std::vector<Event> Monitor::shutdown(Clock::time_point now) {
+    std::vector<Event> events;
+    if (!session_open_) return events;
+    account_until(now);
+    events.push_back(close_session(now, STOP_MONITOR_SHUTDOWN));
+    return events;
 }
 
 void Monitor::integrate(const Sample& sample, std::vector<Event>& events) {
