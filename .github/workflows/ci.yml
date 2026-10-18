@@ -16,7 +16,7 @@ jobs:
       run:
         working-directory: charger_project
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=${{ matrix.compiler }} -DCHARGER_WERROR=ON
       - name: Build
@@ -59,7 +59,7 @@ jobs:
       run:
         working-directory: charger_project
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Configure
         run: cmake -S . -B build-san -DCMAKE_BUILD_TYPE=Debug -DCHARGER_SANITIZERS=ON
       - name: Build
@@ -76,7 +76,7 @@ jobs:
       run:
         working-directory: charger_project
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Configure with coverage
         run: >-
           cmake -S . -B build-cov -DCMAKE_BUILD_TYPE=Debug
@@ -109,7 +109,7 @@ jobs:
       run:
         working-directory: charger_project
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install clang and gcovr
         run: sudo apt-get update && sudo apt-get install -y clang gcovr
       - name: Configure
@@ -125,7 +125,7 @@ jobs:
     name: dashboard (independent verifier vs the C++ tools)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build the C++ tools
         run: |
           cmake -S charger_project -B build -DCMAKE_BUILD_TYPE=Release
@@ -143,7 +143,7 @@ jobs:
     name: clang-format
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install clang-format
         run: sudo apt-get update && sudo apt-get install -y clang-format
       - name: Check formatting
