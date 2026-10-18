@@ -40,6 +40,17 @@ jobs:
             exit 1
           fi
           rm -f "$tmp" "$tmp.bad"
+      - name: Synthetic journal determinism
+        run: |
+          # The scenario is a pure function of its arguments: two runs must be
+          # byte-identical, and the result must be a journal the real tools accept.
+          work="$(mktemp -d)"
+          ./build/charger_synth --out "$work/a.journal" --seed 7 --days 3 2>/dev/null
+          ./build/charger_synth --out "$work/b.journal" --seed 7 --days 3 2>/dev/null
+          cmp "$work/a.journal" "$work/b.journal"
+          ./build/charger_monitor --verify-journal --journal "$work/a.journal"
+          ./build/charger_settle "$work/a.journal" --metrics | grep -q '^charger_portfolio_sessions_closed '
+          rm -rf "$work"
 
   sanitizers:
     name: build (asan+ubsan)
@@ -109,6 +120,24 @@ jobs:
         run: |
           ./build-fuzz/charger_fuzz -max_total_time=20 -rss_limit_mb=2048
         # Fallisce se libFuzzer trova crash/UB/leak: il corpus polveriza anche i percorsi di reset
+
+  dashboard:
+    name: dashboard (independent verifier vs the C++ tools)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the C++ tools
+        run: |
+          cmake -S charger_project -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+      - name: The committed bundle is current
+        run: python3 scripts/build_dashboard.py --check
+      - name: The demo data and goldens are what the tools produce today
+        run: |
+          bash dashboard/tests/regen_golden.sh build
+          git diff --exit-code -- dashboard/data dashboard/tests/golden
+      - name: Core tests (parity with the C++ tools on freshly synthesised journals)
+        run: CHARGER_BUILD_DIR="$PWD/build" node --test dashboard/tests/core.test.mjs
 
   format:
     name: clang-format
