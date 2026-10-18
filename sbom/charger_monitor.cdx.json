@@ -1,0 +1,50 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:1b259fb2-6953-5fe9-8263-dc7ea9b074a4",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-10-18T00:00:00Z",
+    "component": {
+      "type": "library",
+      "bom-ref": "charger_monitor@1.4.0",
+      "name": "charger_monitor",
+      "version": "1.4.0",
+      "description": "Deterministic monitoring library and tools for industrial DC charger bays",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/elmoutaouakiltarik-web/charger_monitor"
+        }
+      ]
+    },
+    "properties": [
+      {
+        "name": "charger_monitor:third-party-runtime-components",
+        "value": "0"
+      },
+      {
+        "name": "charger_monitor:build-tools",
+        "value": "C++17 compiler with __int128 (GCC or Clang), CMake >= 3.16; not shipped"
+      },
+      {
+        "name": "charger_monitor:dashboard",
+        "value": "single offline HTML file; no third-party scripts, fonts or styles"
+      }
+    ]
+  },
+  "components": [],
+  "dependencies": [
+    {
+      "ref": "charger_monitor@1.4.0",
+      "dependsOn": []
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta http-equiv="Content-Security-Policy" content="__CSP__">
+<meta name="description" content="Read-only, offline control room for charger_monitor: verify a journal's hash chain, see what may be invoiced, and watch live bays. Nothing leaves your browser.">
+<title>Charger Control Room</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232a78d6'/%3E%3Cpath d='M17.5 5.5L8.5 18h6.2l-1.4 8.5 9.2-13h-6.2l1.2-8z' fill='%23fff'/%3E%3C/svg%3E">
+<style>
+__CSS__
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="6" height="6" fill="#d95926"/>
+      <line x1="0" y1="0" x2="0" y2="6" stroke="#222" stroke-width="2.5"/>
+    </pattern>
+  </defs>
+</svg>
+<div id="app"><noscript>Charger Control Room needs JavaScript. It is a single offline file with no dependencies and makes no external requests.</noscript></div>
+<script type="application/json" id="demo-data">__DEMO__</script>
+<script type="application/json" id="embedded"></script>
+<script>
+__JS__
+</script>
+</body>
+</html>

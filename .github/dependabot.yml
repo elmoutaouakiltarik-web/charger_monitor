@@ -1,0 +1,9 @@
+# The library has no dependencies to update. The only moving parts are the
+# GitHub Actions the CI workflow uses; keep them current (and pinned) so the
+# build that produces a release is itself reviewed.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
