@@ -17,6 +17,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "charger_config.hpp"
+
 namespace charger {
 
 constexpr const char* VERSION = "2.0.0";
