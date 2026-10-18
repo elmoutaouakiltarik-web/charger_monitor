@@ -312,6 +312,47 @@ struct WebhookEvent {
     static std::string compute_signature(const std::string& payload, const std::string& secret);
 };
 
+// === NEW: Multi-Bay Configuration ===
+struct BayConfig {
+    Config config;               // Per-bay configuration
+    bool enabled{true};          // Whether this bay is active
+    int priority{0};             // Processing priority (higher = more frequent)
+};
+
+struct MultiBayConfig {
+    std::string schema{MULTIBAY_CONFIG_SCHEMA};
+    std::vector<BayConfig> bays;
+    // Global settings
+    std::chrono::milliseconds global_report_interval{5000};
+    bool enable_cross_bay_analytics{true};
+    std::string webhook_url{ "" };
+    std::string webhook_secret{ "" };
+    // Fleet-level OCPI metadata
+    std::string ocpi_operator_id{ "" };
+    std::string ocpi_country_code{ "" };
+    std::string ocpi_party_id{ "" };
+};
+
+// === NEW: Power Module Profile ===
+// Vendor-specific CAN signal mappings for power module diagnostics.
+struct PowerModuleProfile {
+    std::string name;
+    std::string vendor;
+    std::string model;
+    std::string dbc_text;        // Embedded DBC content
+    // Signal mappings for power module telemetry
+    std::string temp_signal;     // Temperature signal name
+    std::string fan_speed_signal;
+    std::string dc_link_voltage_signal;
+    std::string interlock_signal;
+    std::string fault_code_signal;
+    // Thresholds
+    std::int32_t max_temp_c{80};
+    std::int32_t min_fan_rpm{1000};
+    std::int32_t min_dc_link_v{300};
+    std::int32_t max_dc_link_v{900};
+};
+
 // === NEW: Advanced Analytics Types ===
 struct TrendPoint {
     std::string timestamp_utc;
