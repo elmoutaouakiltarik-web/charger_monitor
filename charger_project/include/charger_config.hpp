@@ -14,6 +14,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <chrono>
 
 #include "charger_monitor.hpp"
 
@@ -43,7 +44,27 @@ struct ConfigLoadResult {
 // the config must exist in the DBC, otherwise the config is rejected.
 ConfigLoadResult parse_config(const std::string& text, const std::string& dbc_text = std::string());
 
-// === NEW: Multi-Bay Configuration parsing ===
+// === NEW: Multi-Bay Configuration types ===
+struct BayConfig {
+    Config config;               // Per-bay configuration
+    bool enabled{true};          // Whether this bay is active
+    int priority{0};             // Processing priority (higher = more frequent)
+};
+
+struct MultiBayConfig {
+    std::string schema{MULTIBAY_CONFIG_SCHEMA};
+    std::vector<BayConfig> bays;
+    // Global settings
+    std::chrono::milliseconds global_report_interval{5000};
+    bool enable_cross_bay_analytics{true};
+    std::string webhook_url{ "" };
+    std::string webhook_secret{ "" };
+    // Fleet-level OCPI metadata
+    std::string ocpi_operator_id{ "" };
+    std::string ocpi_country_code{ "" };
+    std::string ocpi_party_id{ "" };
+};
+
 struct MultiBayConfigLoadResult {
     bool ok{false};
     MultiBayConfig config{};
@@ -52,7 +73,25 @@ struct MultiBayConfigLoadResult {
 MultiBayConfigLoadResult parse_multibay_config(const std::string& text);
 std::string json_multibay_config_example();
 
-// === NEW: Power Module Profile management ===
+// === NEW: Power Module Profile types ===
+struct PowerModuleProfile {
+    std::string name;
+    std::string vendor;
+    std::string model;
+    std::string dbc_text;        // Embedded DBC content
+    // Signal mappings for power module telemetry
+    std::string temp_signal;     // Temperature signal name
+    std::string fan_speed_signal;
+    std::string dc_link_voltage_signal;
+    std::string interlock_signal;
+    std::string fault_code_signal;
+    // Thresholds
+    std::int32_t max_temp_c{80};
+    std::int32_t min_fan_rpm{1000};
+    std::int32_t min_dc_link_v{300};
+    std::int32_t max_dc_link_v{900};
+};
+
 struct PowerModuleProfileLoadResult {
     bool ok{false};
     PowerModuleProfile profile{};
