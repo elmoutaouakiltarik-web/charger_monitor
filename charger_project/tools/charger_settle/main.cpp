@@ -32,6 +32,11 @@
 //
 // Exit codes: 0 settled, 2 usage or verification error, 3 journal altered, 4 reconciliation found drift.
 
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 #include <charger_export.hpp>
 #include <charger_ledger.hpp>
 #include <charger_monitor.hpp>
@@ -314,6 +319,14 @@ bool tou_estimate_session(const TimeOfUse& tou, const SettledSession& s, std::in
 }  // namespace
 
 int main(int argc, char** argv) {
+#if defined(_WIN32)
+    // A Windows text-mode stdout injects CR, so `--metrics` on stdout would
+    // differ byte-wise from the same content written to a file with --out.
+    // Both are documents: emit raw bytes on both paths.
+    _setmode(_fileno(stdout), _O_BINARY);
+    _setmode(_fileno(stderr), _O_BINARY);
+#endif
+
     Options opt;
     std::string err;
     if (!parse_args(argc, argv, opt, err)) {

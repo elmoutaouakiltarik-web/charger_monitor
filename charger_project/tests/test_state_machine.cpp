@@ -1249,10 +1249,8 @@ int main() {
 
     // --- Journal anchor: prefix proven while the journal keeps growing ---
     {
-        const std::string journal =
-            (std::filesystem::temp_directory_path() / "charger_anchor_test.journal").string();
-        const std::string anchor =
-            (std::filesystem::temp_directory_path() / "charger_anchor_test.anchor").string();
+        const std::string journal = (std::filesystem::temp_directory_path() / "charger_anchor_test.journal").string();
+        const std::string anchor = (std::filesystem::temp_directory_path() / "charger_anchor_test.anchor").string();
         std::filesystem::remove(journal);
         std::filesystem::remove(anchor);
         std::string ignore;
@@ -1303,6 +1301,85 @@ int main() {
         require(!verify_journal_anchor(journal, anchor, appended, aerr), "a rewritten prefix fails the anchor");
         std::filesystem::remove(journal);
         std::filesystem::remove(anchor);
+    }
+
+    // --- A write that does not land must be reported, not absorbed ---
+    //
+    // Billing runs off this file. A close line that never reached the journal
+    // must never appear in memory as a settlement, or a portfolio rollup would
+    // invoice energy that was never durably recorded.
+    {
+        namespace fs = std::filesystem;
+        std::string err;
+        const fs::path dir = fs::temp_directory_path() / "charger_writefail";
+        fs::remove_all(dir);
+        fs::create_directories(dir);
+        const fs::path journal = dir / "b.journal";
+        const fs::path blocked = dir / "as-a-directory";
+        fs::create_directories(blocked);
+
+        SessionRecord rec;
+        rec.id = 1;
+        rec.energy_uwh = 4800000000;
+        rec.energy_wh = 4800;
+        rec.duration_ms = 3600000;
+        rec.samples = 2;
+        rec.billing_complete = true;
+        rec.quality = "OK";
+
+        // (a) A path that cannot be opened for append at all.
+        {
+            auto led = Ledger::open(blocked.string(), false, err);
+            require(led.has_value(), "a ledger can be constructed on an unwritable path");
+            require(!led->append_session_open(rec, "bay-1", "2026-01-01T00:00:00Z"),
+                    "an open on an unwritable journal reports failure");
+            require(!led->append_session_close(rec, "bay-1", "EUR", "2026-01-01T01:00:00Z"),
+                    "a close on an unwritable journal reports failure");
+            require(led->sessions().empty(), "a session that was never written is not in memory as settled");
+            require(led->lines_written() == 0, "no line is counted as written");
+        }
+
+        // (b) A journal that exists and verifies, then stops accepting writes.
+        {
+            auto led = Ledger::open(journal.string(), false, err);
+            require(led.has_value(), "the journal opens for writing");
+            require(led->append_session_open(rec, "bay-1", "2026-01-01T00:00:00Z"), "the first open lands");
+            led->recover();
+            const auto before_bytes = fs::file_size(journal);
+
+            // Make the file read-only: the next append cannot open it.
+            fs::permissions(journal, fs::perms::owner_read, fs::perm_options::replace);
+            const bool wrote = led->append_session_close(rec, "bay-1", "EUR", "2026-01-01T01:00:00Z");
+#if defined(_WIN32)
+            require(!wrote, "a close on a read-only journal reports failure");
+#else
+            // Running as root defeats the permission bits, so only assert the
+            // invariant that must hold either way: memory never claims a
+            // settlement the file does not contain.
+            if (wrote) {
+                fs::permissions(journal, fs::perms::owner_all, fs::perm_options::replace);
+            }
+#endif
+            const auto after_bytes = fs::file_size(journal);
+            require(after_bytes == before_bytes, "a failed write leaves the journal byte-identical");
+
+            // Whatever happened above, the file must still be a valid chain.
+            fs::permissions(journal, fs::perms::owner_all, fs::perm_options::replace);
+            auto reopened = Ledger::open(journal.string(), false, err);
+            require(reopened.has_value(), "the journal reopens after the failure");
+            std::string verr;
+            require(reopened->verify(verr), "the chain still verifies after a failed write: " + verr);
+            const auto rep = reopened->recover();
+            require(rep.session_closes == 0, "the close that failed is not in the file");
+
+            // And the next append still lands, proving the failure left no torn
+            // line behind for it to build on.
+            require(reopened->append_session_close(rec, "bay-1", "EUR", "2026-01-01T01:00:00Z"),
+                    "a later append succeeds after an earlier failure");
+            std::string verr2;
+            require(reopened->verify(verr2), "the chain verifies with the line written after the failure: " + verr2);
+        }
+        fs::remove_all(dir);
     }
 
     std::cout << "All tests passed\n";

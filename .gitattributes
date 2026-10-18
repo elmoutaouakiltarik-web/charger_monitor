@@ -1,0 +1,50 @@
+# Line endings are part of the build, not a matter of taste.
+#
+# This project is developed on Windows and deployed and verified on Linux. With
+# core.autocrlf=true a checkout rewrites the shell scripts to CRLF, and bash then
+# fails before it runs anything:
+#
+#   scripts/e2e_replay.sh: line 7: set: pipefail^M: invalid option name
+#
+# The failure looks like a test bug and is not one, so the endings are pinned
+# here instead of left to each developer's configuration.
+
+# Shell scripts and anything else executed by a POSIX shell: always LF.
+*.sh text eol=lf
+*.bash text eol=lf
+
+# Sources and configuration: text, LF in the repository. Windows tools cope with
+# LF, and a CRLF in a source file is pure noise in a diff.
+*.cpp text eol=lf
+*.hpp text eol=lf
+*.h text eol=lf
+*.c text eol=lf
+*.py text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.json text eol=lf
+*.ndjson text eol=lf
+*.dbc text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.cmake text eol=lf
+*.conf text eol=lf
+*.service text eol=lf
+CMakeLists.txt text eol=lf
+*.cff text eol=lf
+
+# Never line-ending translated: these are bytes, not text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.exe binary

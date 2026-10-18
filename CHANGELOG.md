@@ -37,6 +37,39 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- **A journal write that did not land was reported as recorded.**
+  `append_session_open()` and `append_session_close()` returned `void` and
+  discarded the result of `append()`, and the close path pushed the session into
+  the in-memory `sessions_` regardless. A full disk or a revoked permission
+  therefore produced a process that reported a settlement the file did not
+  contain, and a portfolio rollup could bill on it. Both now return `bool`, the
+  caller checks it, and the session enters `sessions_` only when the line is on
+  disk. The monitor additionally skips the JSONL session log when the journal
+  close failed, so the two records cannot disagree. **Source-compatible** with
+  existing callers, which may keep ignoring the result.
+- **A partial journal write left a torn line for the next append to build on.**
+  A short `fwrite` returned an error but kept the bytes it had already written,
+  so the following append started after a partial row and the chain could never
+  verify again. The append now records where the valid journal ends and truncates
+  back to exactly that point on failure, leaving the file verifiable and no valid
+  data removed. A failed write leaves the journal byte-identical.
+- **Durability was assumed, not checked.** `sync_file()` ignored the results of
+  `fflush()`, `fsync()`/`_commit()` and the caller's `fclose()`, so a journal
+  line could be reported as committed when the flush or the sync had failed. All
+  three are now checked, the sync runs only after a successful flush, and a line
+  that cannot be made durable is rolled back and reported as unwritten.
+- `.gitattributes` was missing, so with `core.autocrlf=true` a Windows checkout
+  rewrote the shell scripts to CRLF and `bash` refused to run them
+  (`set: pipefail^M: invalid option name`). Line endings are now pinned per file
+  type instead of left to each developer's configuration.
+- `charger_synth_tests` shelled out through `std::system()`, which hands the
+  command to `cmd /c` on Windows; the shell re-parsed the quoting and the run
+  failed with a filename syntax error before the synthesiser did anything. It now
+  spawns the binary directly with an argument vector.
+- `charger_export_tests` held an `ifstream` open over a file it then deleted,
+  which succeeds on Linux and fails on Windows where the handle locks the file.
+- `charger_ocpp.cpp`, `charger_tou.cpp` and `charger_tou.hpp` were not
+  clang-format clean, so the format job in CI would have failed.
 - TOU slices were labelled by the second they end in, moving the second that
   ends exactly on a window boundary into the next window (a systematic
   one-second misallocation per crossing). Slices are now labelled by the

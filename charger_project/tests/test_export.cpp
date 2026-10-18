@@ -397,10 +397,15 @@ int main() {
         std::string err;
         require(write_file_atomic(target, "old\n", err), "first write: " + err);
         require(write_file_atomic(target, "new content\n", err, false), "replace: " + err);
-        std::ifstream in(target, std::ios::binary);
-        std::ostringstream got;
-        got << in.rdbuf();
-        require(got.str() == "new content\n", "the target holds the new content");
+        {
+            // Scoped on purpose: an open stream keeps a Windows file locked, and
+            // the remove_all below would then fail on a handle this test still
+            // holds. Linux unlinks open files, so only Windows saw it.
+            std::ifstream in(target, std::ios::binary);
+            std::ostringstream got;
+            got << in.rdbuf();
+            require(got.str() == "new content\n", "the target holds the new content");
+        }
         std::size_t files = 0;
         for (const auto& e : fs::directory_iterator(dir)) {
             (void)e;

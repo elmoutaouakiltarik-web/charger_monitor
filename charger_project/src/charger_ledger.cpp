@@ -4,11 +4,13 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <map>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -78,13 +80,38 @@ void sha256_block(std::uint32_t state[8], const unsigned char block[64]) {
     state[7] += h;
 }
 
-void sync_file(std::FILE* f) {
-    if (f == nullptr) return;
-    std::fflush(f);
+// Makes the bytes written so far durable. Returns false if any step failed, so
+// the caller can refuse to call a line recorded. An unchecked fsync would let a
+// full disk or a revoked permission pass for a durable commit.
+bool sync_file(std::FILE* f) {
+    if (f == nullptr) return false;
+    // Flush the userspace buffer first: fsync only covers what reached the
+    // kernel, so syncing before the flush would persist nothing.
+    if (std::fflush(f) != 0) return false;
 #if defined(_WIN32)
-    _commit(_fileno(f));
+    return _commit(_fileno(f)) == 0;
 #else
-    ::fsync(::fileno(f));
+    return ::fsync(::fileno(f)) == 0;
+#endif
+}
+
+// Size of the file in bytes, or -1 when it cannot be established.
+std::int64_t file_size_of(const std::string& path) {
+    std::error_code ec;
+    const auto n = std::filesystem::file_size(path, ec);
+    if (ec) return -1;
+    return static_cast<std::int64_t>(n);
+}
+
+// Drops everything past `size` bytes, so a torn write leaves no half line for
+// the next append to build on. Best effort: the caller has already lost the
+// write and must report it either way.
+bool truncate_file(std::FILE* f, std::int64_t size) {
+    if (f == nullptr || size < 0) return false;
+#if defined(_WIN32)
+    return _chsize_s(_fileno(f), static_cast<std::int64_t>(size)) == 0;
+#else
+    return ::ftruncate(::fileno(f), static_cast<::off_t>(size)) == 0;
 #endif
 }
 
@@ -325,33 +352,64 @@ bool Ledger::append(const std::string& type, const std::string& asset, const Ses
     std::FILE* f = std::fopen(path_.c_str(), "ab");
     if (f == nullptr) return false;
     const std::string data = line.str();
+
+    // Where the valid journal ends right now. A write that stops halfway must be
+    // rolled back to exactly this point: leaving the torn bytes in place would
+    // make the next append start after a partial line, and the chain could then
+    // never verify again.
+    const std::int64_t good_end = file_size_of(path_);
+
     const std::size_t written = std::fwrite(data.data(), 1, data.size(), f);
-    const bool ok = written == data.size();
-    if (ok && fsync_on_commit_) sync_file(f);
-    std::fclose(f);
-    if (!ok) return false;
+    if (written != data.size()) {
+        std::fflush(f);
+        truncate_file(f, good_end);
+        std::fclose(f);
+        return false;
+    }
+    bool durable = true;
+    if (fsync_on_commit_) durable = sync_file(f);
+    // A failing close means the last bytes may never have reached the device.
+    if (std::fclose(f) != 0) durable = false;
+    if (!durable) {
+        // The line is not trustworthy: take it back out rather than leaving a
+        // recorded-but-not-durable row that a later reader would trust.
+        if (std::FILE* rollback = std::fopen(path_.c_str(), "r+b")) {
+            truncate_file(rollback, good_end);
+            std::fclose(rollback);
+        }
+        return false;
+    }
     last_hash_ = hash;
     ++lines_written_;
     track(asset, rec, type);
     return true;
 }
 
-void Ledger::append_session_open(const SessionRecord& rec, const std::string& asset_id,
+// Returns false when the line did not reach the journal. A caller that ignores
+// the result would go on believing the session was recorded when it was not.
+bool Ledger::append_session_open(const SessionRecord& rec, const std::string& asset_id,
                                  const std::string& opened_at_utc) {
     context_currency_.clear();
     context_timestamp_ = opened_at_utc;
     std::ostringstream o;
     o << "{\"schema\":\"" << LEDGER_SCHEMA << "\",\"type\":\"session_open\",\"asset_id\":\"" << asset_id
       << "\",\"session_id\":" << rec.id << ",\"opened_at_utc\":\"" << opened_at_utc << "\"}";
-    append("session_open", asset_id, rec, o.str());
+    return append("session_open", asset_id, rec, o.str());
 }
 
-void Ledger::append_session_close(const SessionRecord& rec, const std::string& asset_id, const std::string& currency,
+// Returns false when the close line did not reach the journal. On failure the
+// session is deliberately NOT added to sessions_: the in-memory view must never
+// claim a settlement the file does not contain, or a portfolio rollup would bill
+// on energy that was never durably recorded.
+bool Ledger::append_session_close(const SessionRecord& rec, const std::string& asset_id, const std::string& currency,
                                   const std::string& closed_at_utc, const std::string& tariff_json) {
     context_currency_ = currency;
     context_timestamp_ = closed_at_utc;
     context_tariff_ = tariff_json;
-    append("session_close", asset_id, rec, json_session_line(rec, asset_id, currency, closed_at_utc, tariff_json));
+    if (!append("session_close", asset_id, rec,
+                json_session_line(rec, asset_id, currency, closed_at_utc, tariff_json))) {
+        return false;
+    }
     SettledSession s;
     s.asset_id = asset_id;
     s.id = rec.id;
@@ -360,6 +418,7 @@ void Ledger::append_session_close(const SessionRecord& rec, const std::string& a
     s.closed_at_utc = closed_at_utc;
     s.tariff_json = tariff_json;
     sessions_.push_back(s);
+    return true;
 }
 
 RecoveryReport Ledger::recover() {
@@ -798,8 +857,8 @@ bool verify_journal_anchor(const std::string& journal_path, const std::string& a
         if (lineno > anchor->lines && anchor->lines == 0) break;
     }
     if (hash_at_anchor != anchor->last_hash) {
-        error = "anchor mismatch: line " + std::to_string(anchor->lines) + " no longer hashes to " +
-                anchor->last_hash + ": the prefix was rewritten";
+        error = "anchor mismatch: line " + std::to_string(anchor->lines) + " no longer hashes to " + anchor->last_hash +
+                ": the prefix was rewritten";
         return false;
     }
     appended_lines = rep.lines > anchor->lines ? rep.lines - anchor->lines : 0;

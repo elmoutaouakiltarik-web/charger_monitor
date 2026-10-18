@@ -15,7 +15,11 @@ cmake --install "$BIN" --prefix "$work/prefix" >/dev/null
 cmake -S examples/consume_library -B "$work/consumer" -DCMAKE_PREFIX_PATH="$work/prefix" >/dev/null
 cmake --build "$work/consumer" --parallel >/dev/null
 
-out="$("$work/consumer/consumer")"
+consumer="$work/consumer/consumer"
+# Prefer the explicit .exe: without one, an MSYS exec of a native binary can
+# fail silently with 127 even though the path resolves.
+[ -x "$consumer.exe" ] && consumer="$consumer.exe"
+out="$("$consumer")"
 echo "$out"
 
 if ! echo "$out" | grep -q '4800 Wh'; then

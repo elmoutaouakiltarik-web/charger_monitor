@@ -626,31 +626,41 @@ class SessionLog {
         const std::string stamp = wall.utc(now);
         if (opened && journal_enabled_ && snap.session) {
             const auto before = ledger_.lines_written();
-            ledger_.append_session_open(*snap.session, snap.asset_id, stamp);
-            warn_if_not_written(before, "session open", snap.asset_id, snap.session->id);
+            const bool written = ledger_.append_session_open(*snap.session, snap.asset_id, stamp);
+            warn_if_not_written(written, before, "session open", snap.asset_id, snap.session->id);
         }
         if (!closed) return;
         // The tariff of record travels with the session so a dispute can be
         // verified years later, even when the running configuration changed.
         const std::string tariff = charger::json_tariff_block(monitor.config().tariff);
+        bool close_recorded = true;
         if (journal_enabled_ && snap.last_session) {
             const auto before = ledger_.lines_written();
-            ledger_.append_session_close(*snap.last_session, snap.asset_id, snap.currency, stamp, tariff);
-            warn_if_not_written(before, "session close", snap.asset_id, snap.last_session->id);
+            close_recorded =
+                ledger_.append_session_close(*snap.last_session, snap.asset_id, snap.currency, stamp, tariff);
+            warn_if_not_written(close_recorded, before, "session close", snap.asset_id, snap.last_session->id);
         }
         if (jsonl_enabled_ && snap.last_session) {
-            out_ << charger::json_session_line(*snap.last_session, snap.asset_id, snap.currency, stamp, tariff) << '\n';
-            out_.flush();
-            if (!out_) std::cerr << "SESSION_LOG_FAILED\n";
+            // A close line that never reached the journal must not reach the
+            // session log either, or the two records would disagree.
+            if (!close_recorded) {
+                std::cerr << "SESSION_LOG_SKIPPED: " << snap.asset_id << " #" << snap.last_session->id
+                          << " is absent from the journal, so it is absent here too" << std::endl;
+            } else {
+                out_ << charger::json_session_line(*snap.last_session, snap.asset_id, snap.currency, stamp, tariff)
+                     << '\n';
+                out_.flush();
+                if (!out_) std::cerr << "SESSION_LOG_FAILED\n";
+            }
         }
     }
 
    private:
     // The journal is the billing record: a line that did not reach it must never
     // pass in silence (a full disk, a revoked permission).
-    void warn_if_not_written(std::uint64_t lines_before, const char* what, const std::string& asset,
+    void warn_if_not_written(bool written, std::uint64_t lines_before, const char* what, const std::string& asset,
                              std::uint64_t id) const {
-        if (ledger_.lines_written() != lines_before) return;
+        if (written && ledger_.lines_written() != lines_before) return;
         std::cerr << "JOURNAL_WRITE_FAILED: " << what << " of " << asset << " #" << id << " did not reach "
                   << ledger_.path() << "; the session is NOT recorded in the journal" << std::endl;
     }

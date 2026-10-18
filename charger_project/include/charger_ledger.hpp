@@ -150,8 +150,13 @@ class Ledger {
     // error on the first mismatch, naming the line.
     bool verify(std::string& error) const;
 
-    void append_session_open(const SessionRecord& rec, const std::string& asset_id, const std::string& opened_at_utc);
-    void append_session_close(const SessionRecord& rec, const std::string& asset_id, const std::string& currency,
+    // Appends a line and reports whether it reached the journal. false means the
+    // bytes are NOT durable: a partial write has been rolled back to the last
+    // good line, so the file is still verifiable and no valid data was removed.
+    // Ignoring the result is how a caller ends up believing it recorded a
+    // settlement it never wrote.
+    bool append_session_open(const SessionRecord& rec, const std::string& asset_id, const std::string& opened_at_utc);
+    bool append_session_close(const SessionRecord& rec, const std::string& asset_id, const std::string& currency,
                               const std::string& closed_at_utc, const std::string& tariff_json = {});
 
     std::uint64_t lines_written() const noexcept { return lines_written_; }

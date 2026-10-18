@@ -2,12 +2,18 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iostream>
 #include <map>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
+
+#if defined(_WIN32)
+#include <process.h>
+#endif
 
 #include "charger_ledger.hpp"
 
@@ -26,10 +32,31 @@ std::string read_all(const std::string& path) {
     return o.str();
 }
 
-// Runs the synthesiser and returns its exit status (0 on success).
-int run(const std::string& synth, const std::string& args) {
-    const std::string cmd = "\"" + synth + "\" " + args + " 2>/dev/null";
+// Runs the synthesiser and returns its status (0 on success).
+//
+// Deliberately without a shell. std::system() hands the command string to
+// `cmd /c`, which re-parses the quoting it was given: a program path and its
+// arguments all wrapped in quotes arrive mangled, so on Windows the run failed
+// with a filename syntax error before the synthesiser had done anything. The
+// arguments go across as a vector and nothing has to be escaped.
+int run(const std::string& synth, const std::vector<std::string>& args) {
+#if defined(_WIN32)
+    std::vector<const char*> argv;
+    argv.reserve(args.size() + 2);
+    argv.push_back(synth.c_str());
+    for (const auto& a : args) argv.push_back(a.c_str());
+    argv.push_back(nullptr);
+    const intptr_t rc = _spawnv(_P_WAIT, synth.c_str(), argv.data());
+    return rc < 0 ? -1 : static_cast<int>(rc);
+#else
+    std::string cmd = "\"" + synth + "\"";
+    for (const auto& a : args) cmd += " \"" + a + "\"";
     return std::system(cmd.c_str());
+#endif
+}
+
+int run(const std::string& synth, std::initializer_list<std::string> args) {
+    return run(synth, std::vector<std::string>(args));
 }
 
 }  // namespace
@@ -44,7 +71,7 @@ int main(int argc, char** argv) {
     const std::string a = (dir / "a.journal").string(), b = (dir / "b.journal").string(),
                       c = (dir / "c.journal").string(), snaps = (dir / "s.ndjson").string();
 
-    require(run(synth, "--out \"" + a + "\" --snapshots-out \"" + snaps + "\"") == 0, "the default scenario runs");
+    require(run(synth, {"--out", a, "--snapshots-out", snaps}) == 0, "the default scenario runs");
 
     // The journal is genuine: the real ledger accepts it end to end.
     std::string err;
@@ -97,28 +124,32 @@ int main(int argc, char** argv) {
 
     // Determinism: same arguments, same bytes; another seed, another journal. A
     // smaller scenario keeps this fast under the sanitizers.
-    const std::string small = "--days 2 --bays 3";
-    require(
-        run(synth, "--out \"" + b + "\" " + small + " --snapshots-out \"" + (dir / "t.ndjson").string() + "\"") == 0,
-        "small scenario with a capture");
-    require(run(synth, "--out \"" + c + "\" " + small) == 0, "small scenario without a capture");
+    const std::vector<std::string> small{"--days", "2", "--bays", "3"};
+    auto with_small = [&](const std::string& out, const std::vector<std::string>& extra) {
+        std::vector<std::string> args{"--out", out};
+        args.insert(args.end(), small.begin(), small.end());
+        args.insert(args.end(), extra.begin(), extra.end());
+        return run(synth, args);
+    };
+    require(with_small(b, {"--snapshots-out", (dir / "t.ndjson").string()}) == 0, "small scenario with a capture");
+    require(with_small(c, {}) == 0, "small scenario without a capture");
     require(read_all(b) == read_all(c), "the same seed must give a byte-identical journal, snapshots or not");
     const std::string d = (dir / "d.journal").string();
-    require(run(synth, "--out \"" + d + "\" " + small + " --seed 2") == 0, "seed 2 runs");
+    require(with_small(d, {"--seed", "2"}) == 0, "seed 2 runs");
     require(read_all(b) != read_all(d), "a different seed must give a different journal");
 
     // Refuses to clobber, unless forced.
-    require(run(synth, "--out \"" + b + "\" " + small) != 0, "an existing output must be refused");
-    require(run(synth, "--out \"" + b + "\" " + small + " --force") == 0, "--force replaces it");
+    require(with_small(b, {}) != 0, "an existing output must be refused");
+    require(with_small(b, {"--force"}) == 0, "--force replaces it");
     require(read_all(b) == read_all(c), "forced rewrite is still identical");
-    require(run(synth, "--out \"" + (dir / "x.journal").string() + "\" --days 0") != 0, "bad --days is a usage error");
-    require(run(synth, "--out \"" + (dir / "y.journal").string() + "\" --start 2026-02-30") != 0, "impossible date");
-    require(run(synth, "--out \"" + (dir / "z.journal").string() + "\" --snapshots-every 15") != 0,
+    require(run(synth, {"--out", (dir / "x.journal").string(), "--days", "0"}) != 0, "bad --days is a usage error");
+    require(run(synth, {"--out", (dir / "y.journal").string(), "--start", "2026-02-30"}) != 0, "impossible date");
+    require(run(synth, {"--out", (dir / "z.journal").string(), "--snapshots-every", "15"}) != 0,
             "the capture cadence must be a multiple of the 10 s frame period");
 
     // A single bay still carries every quality.
     const std::string one = (dir / "one.journal").string();
-    require(run(synth, "--out \"" + one + "\" --bays 1 --days 2") == 0, "one bay");
+    require(run(synth, {"--out", one, "--bays", "1", "--days", "2"}) == 0, "one bay");
     auto led1 = Ledger::open(one, false, err);
     require(led1.has_value() && led1->verify(err), "one-bay journal verifies: " + err);
     led1->recover();

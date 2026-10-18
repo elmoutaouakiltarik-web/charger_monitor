@@ -159,9 +159,8 @@ TouCoverage tou_coverage(const TimeOfUse& tou);
 // tariff is incomplete: if any second of the day is uncovered (no window and
 // no fallback covers it) the result is nullopt with an explicit reason.
 // A caller that ignores unpriced_ms would bill that time at zero.
-std::optional<TimeOfUseResult> price_time_of_use_strict(const TimeOfUse& tou,
-                                                         const std::vector<TimeSample>& samples,
-                                                         std::int64_t flat_micro_eur, std::int32_t energy_step_wh,
-                                                         std::int32_t time_step_s, std::string& error);
+std::optional<TimeOfUseResult> price_time_of_use_strict(const TimeOfUse& tou, const std::vector<TimeSample>& samples,
+                                                        std::int64_t flat_micro_eur, std::int32_t energy_step_wh,
+                                                        std::int32_t time_step_s, std::string& error);
 
 }  // namespace charger

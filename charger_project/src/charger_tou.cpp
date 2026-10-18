@@ -246,9 +246,12 @@ std::optional<std::string> parse_str(const std::string& s, std::size_t& i) {
         if (c == '\\') {
             if (i >= s.size()) return std::nullopt;
             const char e = s[i++];
-            if (e == 'n') out.push_back('\n');
-            else if (e == 't') out.push_back('\t');
-            else out.push_back(e);
+            if (e == 'n')
+                out.push_back('\n');
+            else if (e == 't')
+                out.push_back('\t');
+            else
+                out.push_back(e);
         } else {
             out.push_back(c);
         }
@@ -322,9 +325,12 @@ bool parse_window_obj(const std::string& s, std::size_t& i, RawWindow& out, std:
                 err = "invalid value for '" + *key + "'";
                 return false;
             }
-            if (*key == "name") out.name = *v;
-            else if (*key == "start") out.start = *v;
-            else if (*key == "end") out.end = *v;
+            if (*key == "name")
+                out.name = *v;
+            else if (*key == "start")
+                out.start = *v;
+            else if (*key == "end")
+                out.end = *v;
             else if (*key == "energy_eur_per_kwh") {
                 out.energy = *v;
                 out.has_energy = true;
@@ -593,8 +599,7 @@ std::string json_tou_example() {
 
 TouCoverage tou_coverage(const TimeOfUse& tou) {
     TouCoverage c;
-    const bool catch_all =
-        tou.fallback.has_value() && tou.fallback->start_s == 0 && tou.fallback->end_s == 0;
+    const bool catch_all = tou.fallback.has_value() && tou.fallback->start_s == 0 && tou.fallback->end_s == 0;
     for (std::int32_t sod = 0; sod < 86400; ++sod) {
         bool covered = false;
         for (const auto& w : tou.windows) {
@@ -617,10 +622,9 @@ TouCoverage tou_coverage(const TimeOfUse& tou) {
     return c;
 }
 
-std::optional<TimeOfUseResult> price_time_of_use_strict(const TimeOfUse& tou,
-                                                         const std::vector<TimeSample>& samples,
-                                                         std::int64_t flat_micro_eur, std::int32_t energy_step_wh,
-                                                         std::int32_t time_step_s, std::string& error) {
+std::optional<TimeOfUseResult> price_time_of_use_strict(const TimeOfUse& tou, const std::vector<TimeSample>& samples,
+                                                        std::int64_t flat_micro_eur, std::int32_t energy_step_wh,
+                                                        std::int32_t time_step_s, std::string& error) {
     std::string verr;
     // Same catch-all expansion as in parse_tou_json: validate windows alone
     // when the fallback is the file-level catch-all marker.
@@ -688,8 +692,7 @@ std::optional<TimeOfUseResult> price_time_of_use_strict(const TimeOfUse& tou,
         }
         TimeOfUseResult r = price_time_of_use(expanded, samples, flat_micro_eur, energy_step_wh, time_step_s);
         if (r.unpriced_ms != 0) {
-            error = "internal error: expanded fallback still left " + std::to_string(r.unpriced_ms) +
-                    " ms unpriced";
+            error = "internal error: expanded fallback still left " + std::to_string(r.unpriced_ms) + " ms unpriced";
             return std::nullopt;
         }
         return r;

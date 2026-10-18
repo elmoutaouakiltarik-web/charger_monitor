@@ -206,7 +206,8 @@ std::string json_ocpp_events(const SettledSession& s, std::string& error) {
       << ",\"billing_complete\":" << (r.billing_complete ? "true" : "false") << ",\"quality\":\""
       << json_escape_local(r.quality) << "\",\"stop_reason\":\"" << json_escape_local(r.stop_reason)
       << "\",\"energy_lower_bound\":" << (r.energy_lower_bound ? "true" : "false")
-      << ",\"time_upper_bound\":" << (r.time_upper_bound ? "true" : "false") << "}" << ",\"events\":[";
+      << ",\"time_upper_bound\":" << (r.time_upper_bound ? "true" : "false") << "}"
+      << ",\"events\":[";
     // Started
     o << "{\"eventType\":\"Started\",\"timestamp\":\"" << *start << "\",\"triggerReason\":\"ChargingStateChanged\""
       << ",\"seqNo\":0,\"transactionInfo\":{\"transactionId\":\"" << tx << "\",\"chargingState\":\"Charging\"}"

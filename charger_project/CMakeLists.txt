@@ -43,6 +43,12 @@ target_compile_options(charger_core PRIVATE -Wall -Wextra -Wpedantic ${SANFLAGS}
 # appetite for a wrong libstdc++ DLL on PATH deciding whether the journal
 # survives. MinGW ships a mismatched libstdc++-6.dll in unexpected places.
 target_link_options(charger_core PRIVATE ${SANLINK} -static-libgcc -static-libstdc++)
+if(MINGW AND NOT SANLINK)
+    # Downstream find_package() consumers inherit the same self-contained
+    # binary contract: without it a consumer links libstdc++ dynamically and
+    # silently fails to start (exit 127) on a host without that DLL in PATH.
+    target_link_options(charger_core INTERFACE -static-libgcc -static-libstdc++)
+endif()
 # Export as charger::core so downstream projects link a readable name.
 set_target_properties(charger_core PROPERTIES EXPORT_NAME core)
 
