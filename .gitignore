@@ -22,8 +22,8 @@ compile_commands.json
 *.swp
 *~
 
-# Tooling artefacts from external agents
-.freebuff/
+# Tooling artefacts
+# .freebuff/  (remove if present — external tooling directory)
 
 # OS noise
 .DS_Store

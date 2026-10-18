@@ -20,6 +20,7 @@
 namespace charger {
 
 constexpr const char* CONFIG_SCHEMA = "charger.config.v1";
+constexpr const char* MULTIBAY_CONFIG_SCHEMA = "charger.multibay.config.v1";
 
 struct ConfigError {
     std::string field;
@@ -41,6 +42,24 @@ struct ConfigLoadResult {
 // be adopted by pointing at the manufacturer's database file. Signals named in
 // the config must exist in the DBC, otherwise the config is rejected.
 ConfigLoadResult parse_config(const std::string& text, const std::string& dbc_text = std::string());
+
+// === NEW: Multi-Bay Configuration parsing ===
+struct MultiBayConfigLoadResult {
+    bool ok{false};
+    MultiBayConfig config{};
+    std::vector<ConfigError> errors;
+};
+MultiBayConfigLoadResult parse_multibay_config(const std::string& text);
+std::string json_multibay_config_example();
+
+// === NEW: Power Module Profile management ===
+struct PowerModuleProfileLoadResult {
+    bool ok{false};
+    PowerModuleProfile profile{};
+    std::vector<ConfigError> errors;
+};
+PowerModuleProfileLoadResult parse_power_module_profile(const std::string& json_text);
+std::vector<PowerModuleProfile> list_builtin_power_module_profiles();
 
 std::string json_config_example();
 

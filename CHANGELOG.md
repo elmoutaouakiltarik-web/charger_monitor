@@ -35,6 +35,17 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   and example TOU files with placeholder rates in
   `charger_project/examples/tou/`.
 
+### Documentation
+
+- `scripts/verify.sh` runs the whole local verification gate in one command and
+  prints `PASS`/`FAIL`/`SKIP` per step with counts at the end. It mirrors the CI
+  jobs that need no special toolchain, and reports a missing tool as `SKIP`
+  rather than passing it silently.
+- The pull request template now asks for the `verify.sh` summary as evidence
+  instead of a list of checkmarks, and CONTRIBUTING states the merge policy: a
+  real title, no template comments left in the body, no merge with failing
+  checks, no unreviewed self-merge of billing-path changes.
+
 ### Fixed
 
 - **A journal write that did not land was reported as recorded.**

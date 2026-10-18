@@ -16,13 +16,19 @@
 
 namespace charger {
 
-constexpr const char* VERSION = "1.4.0";
+constexpr const char* VERSION = "2.0.0";
 constexpr const char* PROJECT_NAME = "charger_monitor";
 constexpr const char* SNAPSHOT_SCHEMA = "charger.snapshot.v1";
 constexpr const char* SESSION_SCHEMA = "charger.session.v1";
 // stop_reason of a session that was open when the monitor itself was stopped
 // (an update, a restart, a signal). See Monitor::shutdown().
 constexpr const char* STOP_MONITOR_SHUTDOWN = "MONITOR_SHUTDOWN";
+
+// Schema for the multi-bay configuration file.
+constexpr const char* MULTIBAY_CONFIG_SCHEMA = "charger.multibay.config.v1";
+
+// Schema for chained anchors (anchor file format v2).
+constexpr const char* CHAINED_ANCHOR_SCHEMA = "charger.anchor.chained.v1";
 
 using Clock = std::chrono::steady_clock;
 
@@ -118,6 +124,32 @@ struct Config {
     Tariff tariff{};
     std::string currency{"EUR"};
     std::string asset_id{"demo-bay-1"};
+    
+    // === NEW: Multi-bay and advanced features ===
+    // Optional CAN interface name (e.g., "can0", "vcan0"). Empty = use default.
+    std::string can_interface{ "" };
+    // Optional power module profile name for vendor-specific DBC mapping.
+    std::string power_module_profile{ "" };
+    // Optional webhook URL for real-time event streaming.
+    std::string webhook_url{ "" };
+    // Webhook secret for HMAC-SHA256 signature verification.
+    std::string webhook_secret{ "" };
+    // Optional OCMF (Open Charge Metering Format) signed_data passthrough.
+    // When enabled, the monitor includes the meter's signed_data in session records.
+    bool ocmf_enabled{ false };
+    // OCPI CDR export: operator-supplied metadata for CDR generation.
+    std::string ocpi_operator_id{ "" };
+    std::string ocpi_country_code{ "" };
+    std::string ocpi_party_id{ "" };
+    std::string ocpi_location_id{ "" };
+    std::string ocpi_evse_uid{ "" };
+    std::string ocpi_connector_id{ "1" };
+    // Time-of-use tariff profile name (if multiple TOU profiles configured).
+    std::string tou_profile{ "default" };
+    // Hot-reload: when true, the monitor watches config file for changes.
+    bool hot_reload_enabled{ false };
+    // Path to config file for hot-reload.
+    std::string config_file_path{ "" };
 };
 
 struct Measurements {
@@ -153,6 +185,16 @@ struct SessionRecord {
     std::int64_t time_cost_micro_eur{0};
     std::int64_t flat_cost_micro_eur{0};
     std::int64_t total_cost_micro_eur{0};
+    // === NEW: OCMF signed_data passthrough ===
+    // When Config::ocmf_enabled is true, this field contains the meter's
+    // signed meter value (OCMF signedData) as base64-encoded string.
+    std::string ocmf_signed_data{};
+    // OCPI CDR fields for session export.
+    std::string ocpi_cdr_id{};
+    std::string ocpi_start_utc{};
+    std::string ocpi_stop_utc{};
+    std::uint64_t ocpi_meter_start_wh{0};
+    std::uint64_t ocpi_meter_stop_wh{0};
 };
 
 struct AssetKpi {
@@ -216,6 +258,10 @@ struct Snapshot {
     AssetKpi kpi{};
     std::optional<SessionRecord> session;
     std::optional<SessionRecord> last_session;
+    // === NEW: Multi-bay aggregate snapshot ===
+    // When this is a MultiBayMonitor aggregate snapshot, this field contains
+    // per-bay snapshots keyed by asset_id.
+    std::vector<Snapshot> bay_snapshots{};
 };
 
 struct CanFrame {
@@ -230,6 +276,123 @@ struct Event {
     std::string code;
     std::string message;
 };
+
+// === NEW: Chained Anchor (Anchor v2) ===
+// Extends the anchor format with prev_anchor_sha256 to detect anchor deletion.
+// Format: JSON object with fields:
+//   schema: "charger.anchor.chained.v1"
+//   timestamp_utc: RFC3339 UTC timestamp
+//   journal_sha256: SHA256 of the journal file at anchor time
+//   prev_anchor_sha256: SHA256 of the previous anchor file (empty for first)
+//   signature: optional RFC3161 timestamp token or HMAC
+struct ChainedAnchor {
+    std::string schema{CHAINED_ANCHOR_SCHEMA};
+    std::string timestamp_utc;
+    std::string journal_sha256;
+    std::string prev_anchor_sha256;  // empty for genesis anchor
+    std::string signature;           // RFC3161 token or HMAC
+    
+    std::string to_json() const;
+    static std::optional<ChainedAnchor> from_json(const std::string& json);
+    static std::string compute_sha256(const ChainedAnchor& anchor);
+};
+
+// === NEW: Webhook Event for real-time streaming ===
+// Events sent to configured webhook endpoint with HMAC-SHA256 signature.
+struct WebhookEvent {
+    std::string event_type;      // e.g., "session_start", "session_end", "fault", "diagnostic"
+    std::string asset_id;
+    std::string timestamp_utc;   // RFC3339
+    std::string payload_json;    // JSON payload specific to event_type
+    std::string signature;       // HMAC-SHA256 of payload with webhook_secret
+    
+    std::string to_json() const;
+    static std::string compute_signature(const std::string& payload, const std::string& secret);
+};
+
+// === NEW: Multi-Bay Configuration ===
+struct BayConfig {
+    Config config;               // Per-bay configuration
+    bool enabled{true};          // Whether this bay is active
+    int priority{0};             // Processing priority (higher = more frequent)
+};
+
+struct MultiBayConfig {
+    std::string schema{MULTIBAY_CONFIG_SCHEMA};
+    std::vector<BayConfig> bays;
+    // Global settings
+    std::chrono::milliseconds global_report_interval{5000};
+    bool enable_cross_bay_analytics{true};
+    std::string webhook_url{ "" };
+    std::string webhook_secret{ "" };
+    // Fleet-level OCPI metadata
+    std::string ocpi_operator_id{ "" };
+    std::string ocpi_country_code{ "" };
+    std::string ocpi_party_id{ "" };
+};
+
+// === NEW: Power Module Profile ===
+// Vendor-specific CAN signal mappings for power module diagnostics.
+struct PowerModuleProfile {
+    std::string name;
+    std::string vendor;
+    std::string model;
+    std::string dbc_text;        // Embedded DBC content
+    // Signal mappings for power module telemetry
+    std::string temp_signal;     // Temperature signal name
+    std::string fan_speed_signal;
+    std::string dc_link_voltage_signal;
+    std::string interlock_signal;
+    std::string fault_code_signal;
+    // Thresholds
+    std::int32_t max_temp_c{80};
+    std::int32_t min_fan_rpm{1000};
+    std::int32_t min_dc_link_v{300};
+    std::int32_t max_dc_link_v{900};
+};
+
+// === NEW: Advanced Analytics Types ===
+struct TrendPoint {
+    std::string timestamp_utc;
+    double value;
+};
+
+struct SessionTrend {
+    std::string asset_id;
+    std::vector<TrendPoint> energy_wh;
+    std::vector<TrendPoint> duration_s;
+    std::vector<TrendPoint> peak_power_kw;
+    std::vector<TrendPoint> avg_power_kw;
+    std::vector<TrendPoint> efficiency_pct;
+    std::vector<TrendPoint> cost_eur;
+};
+
+struct FleetSummary {
+    std::int64_t timestamp_utc_ms{0};
+    std::uint64_t total_bays{0};
+    std::uint64_t online_bays{0};
+    std::uint64_t charging_bays{0};
+    std::uint64_t fault_bays{0};
+    std::uint64_t total_energy_wh{0};
+    std::int64_t total_revenue_micro_eur{0};
+    std::uint64_t active_sessions{0};
+    double avg_availability_pct{0.0};
+    double avg_utilization_pct{0.0};
+};
+
+struct AnomalyResult {
+    std::string asset_id;
+    std::string anomaly_type;    // "energy_spike", "duration_outlier", "cost_anomaly", "pattern_break"
+    std::string severity;        // "low", "medium", "high", "critical"
+    std::string timestamp_utc;
+    double expected_value;
+    double actual_value;
+    double deviation_pct;
+    std::string description;
+};
+
+// Multi-Bay Monitor forward declaration
+class MultiBayMonitor;
 
 // UNKNOWN: no frame yet. OFF/READY/CHARGING: both streams fresh.
 // DISCONNECTED: a stream exceeded its own timeout. FAULT: latched.
@@ -348,5 +511,124 @@ std::optional<std::int64_t> parse_fixed_point(const std::string& text, std::int6
 std::string format_fixed_point(std::int64_t value, std::int64_t scale);
 
 std::optional<CanFrame> parse_hex_frame(const std::string& line, Clock::time_point now = Clock::now());
+
+// === NEW: Chained Anchor implementation ===
+std::string json_chained_anchor(const ChainedAnchor& anchor);
+std::optional<ChainedAnchor> parse_chained_anchor(const std::string& json);
+bool verify_chained_anchor(const ChainedAnchor& current, const std::string& prev_anchor_sha256);
+std::string compute_anchor_sha256(const ChainedAnchor& anchor);
+
+// === NEW: Webhook implementation ===
+std::string json_webhook_event(const WebhookEvent& event);
+bool send_webhook(const std::string& url, const WebhookEvent& event, const std::string& secret, std::string& error);
+
+// === NEW: Multi-Bay Configuration parsing ===
+struct MultiBayConfigLoadResult {
+    bool ok{false};
+    MultiBayConfig config{};
+    std::vector<ConfigError> errors;
+};
+MultiBayConfigLoadResult parse_multibay_config(const std::string& text);
+std::string json_multibay_config_example();
+
+// === NEW: Power Module Profile management ===
+struct PowerModuleProfileLoadResult {
+    bool ok{false};
+    PowerModuleProfile profile{};
+    std::vector<ConfigError> errors;
+};
+PowerModuleProfileLoadResult parse_power_module_profile(const std::string& json_text);
+std::vector<PowerModuleProfile> list_builtin_power_module_profiles();
+
+// === NEW: Advanced Analytics ===
+SessionTrend compute_session_trend(const std::vector<SessionRecord>& sessions, const std::string& asset_id);
+FleetSummary compute_fleet_summary(const std::vector<Snapshot>& bay_snapshots);
+std::vector<AnomalyResult> detect_anomalies(const std::vector<SessionRecord>& sessions, const std::string& asset_id);
+std::string json_fleet_summary(const FleetSummary& summary);
+std::string json_session_trend(const SessionTrend& trend);
+std::string json_anomalies(const std::vector<AnomalyResult>& anomalies);
+
+// === NEW: OCPI CDR Export ===
+struct OcpiCdrRecord {
+    std::string cdr_id;
+    std::string start_utc;
+    std::string stop_utc;
+    std::uint64_t meter_start_wh;
+    std::uint64_t meter_stop_wh;
+    std::string auth_uid;
+    std::string auth_type;        // "RFID", "APP", "PLUG_AND_CHARGE", etc.
+    std::string currency;
+    std::int64_t total_cost_micro_eur;
+    std::int64_t energy_cost_micro_eur;
+    std::int64_t time_cost_micro_eur;
+    std::int64_t flat_cost_micro_eur;
+    std::string tariff_json;
+    std::string ocmf_signed_data;
+};
+std::string json_ocpi_cdr(const OcpiCdrRecord& cdr);
+std::vector<OcpiCdrRecord> generate_ocpi_cdrs(const std::vector<SessionRecord>& sessions, const Config& config);
+
+// === NEW: Multi-Bay Monitor ===
+class MultiBayMonitor {
+   public:
+    explicit MultiBayMonitor(MultiBayConfig config = {});
+    ~MultiBayMonitor();
+    
+    // Ingest a CAN frame for a specific bay
+    std::vector<Event> ingest(const std::string& asset_id, const CanFrame& frame);
+    
+    // Tick all bays
+    std::vector<Event> tick(Clock::time_point now = Clock::now());
+    
+    // Get aggregate fleet snapshot
+    FleetSummary fleet_snapshot(Clock::time_point now = Clock::now()) const;
+    
+    // Get individual bay snapshot
+    std::optional<Snapshot> bay_snapshot(const std::string& asset_id, Clock::time_point now = Clock::now()) const;
+    
+    // Get all bay snapshots
+    std::vector<Snapshot> all_bay_snapshots(Clock::time_point now = Clock::now()) const;
+    
+    // Hot-reload configuration for a specific bay
+    bool reload_bay_config(const std::string& asset_id, const Config& new_config, std::string& error);
+    
+    // Enable/disable a bay
+    void set_bay_enabled(const std::string& asset_id, bool enabled);
+    
+    // Get list of bay asset IDs
+    std::vector<std::string> bay_asset_ids() const;
+    
+    // Get config for a bay
+    std::optional<Config> bay_config(const std::string& asset_id) const;
+    
+    // Shutdown all bays gracefully
+    std::vector<Event> shutdown(Clock::time_point now = Clock::now());
+    
+    // Analytics
+    SessionTrend bay_trend(const std::string& asset_id) const;
+    std::vector<AnomalyResult> bay_anomalies(const std::string& asset_id) const;
+    
+    // Webhook streaming
+    void set_webhook(const std::string& url, const std::string& secret);
+    
+    const MultiBayConfig& config() const noexcept { return config_; }
+
+   private:
+    struct BayInstance {
+        Config config;
+        std::unique_ptr<Monitor> monitor;
+        bool enabled{true};
+        int priority{0};
+    };
+    
+    MultiBayConfig config_;
+    std::unordered_map<std::string, BayInstance> bays_;
+    std::string webhook_url_;
+    std::string webhook_secret_;
+    mutable std::mutex mutex_;
+    
+    void maybe_send_webhook(const std::string& asset_id, const Event& event);
+    void emit_fleet_webhook(const FleetSummary& summary, Clock::time_point now);
+};
 
 }  // namespace charger

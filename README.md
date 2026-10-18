@@ -338,15 +338,27 @@ unit with a sandbox that cannot write outside its directories ships in
 
 ## Verification
 
-What is checked, and how to run it yourself:
+Everything below runs in one command:
+
+```bash
+bash scripts/verify.sh build
+```
+
+It configures a `-Werror` Release build, runs the suite, and prints `PASS`,
+`FAIL` or `SKIP` per step with counts at the end. A `SKIP` means a tool was
+missing; it is never counted as a pass, and the summary says so.
+
+What it covers, and how to run each piece yourself:
 
 ```bash
 ctest --test-dir build --output-on-failure      # state machine, ledger, exports, synth, tools
 bash charger_project/scripts/e2e_replay.sh      # state sequence, tamper detection, DBC, dispute, supervision files
 bash charger_project/scripts/consume_test.sh    # a downstream find_package consumer
-node --test dashboard/tests/core.test.mjs       # the independent verifier vs the C++ tools, byte for byte
+node --test dashboard/tests/core.test.mjs       # the independent verifier vs. the C++ tools, byte for byte
 node --test dashboard/tests/ui.test.mjs         # browser tests (Playwright; skipped when absent)
 python3 scripts/build_dashboard.py --check      # the committed bundle matches its sources
+clang-format --dry-run --Werror charger_project/src/*.cpp charger_project/tests/*.cpp \
+    charger_project/include/*.hpp charger_project/tools/*/main.cpp
 ```
 
 GitHub Actions is configured for every push but may be disabled on an account

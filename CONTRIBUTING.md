@@ -37,6 +37,21 @@ It does not control hardware.
 
 ## Before opening a pull request
 
+Run the whole gate in one command and paste its summary into the PR body:
+
+```bash
+bash scripts/verify.sh build
+```
+
+It covers what CI covers that does not need a special toolchain: a `-Werror`
+Release build, `ctest`, the end-to-end replay, the `find_package` consumer,
+journal tamper detection, synthetic-journal determinism, clang-format, and the
+dashboard bundle plus the C++/JavaScript parity tests. It prints `PASS`, `FAIL`
+or `SKIP` per step and a count at the end. A `SKIP` is not a pass: it means a
+tool was missing, and the summary says so out loud.
+
+The equivalent commands, if you prefer to run them yourself:
+
 ```bash
 cmake -S charger_project -B build -DCMAKE_BUILD_TYPE=Release -DCHARGER_WERROR=ON
 cmake --build build --parallel
@@ -45,22 +60,50 @@ bash charger_project/scripts/e2e_replay.sh
 bash charger_project/scripts/consume_test.sh
 clang-format --dry-run --Werror charger_project/src/*.cpp charger_project/tests/*.cpp \
     charger_project/include/*.hpp charger_project/tools/*/main.cpp
-
-# dashboard (Node >= 20, no packages to install)
-python3 scripts/build_dashboard.py --check
-CHARGER_BUILD_DIR=build node --test dashboard/tests/core.test.mjs
-node --test dashboard/tests/ui.test.mjs      # needs Playwright; skipped without it
 ```
 
 A change that touches the sanitizer-relevant paths deserves an ASan + UBSan run
 too (`-DCHARGER_SANITIZERS=ON`); parsers deserve a libFuzzer run
-(`-DCHARGER_BUILD_FUZZ=ON` with clang).
+(`-DCHARGER_BUILD_FUZZ=ON` with clang). Those two need toolchains CI installs and
+`verify.sh` does not pretend to cover them.
 
 If you changed a JSON field, bump nothing silently: the schemas in
 `charger.snapshot.v1`, `charger.session.v1`, `charger.ledger.v1`,
 `charger.portfolio.v1` and `charger.config.v1` are a compatibility contract.
 Additive fields are fine, renaming or retyping is a breaking change and needs a
 major version.
+
+## Pull requests
+
+**The pull request is the repository's shop window.** A reviewer, a prospective
+integrator and a potential employer all read it before they read the code, so it
+has to be as carefully made as the code.
+
+- **Title**: `type(scope): one imperative line`. Never a branch name, never a
+  generated identifier. `ai/agent-generated-branch-name` tells a reader nothing
+  and looks automated because it is.
+- **Body**: the template's guidance comments are instructions, not content.
+  Delete them. A body that still contains `<!-- One sentence -->` says nobody
+  read it.
+- **Evidence over checkmarks.** A ticked box is a claim; the summary line from
+  `scripts/verify.sh` is evidence. Paste the counts. If a step was skipped, name
+  it.
+- **Do not merge with failing checks.** Not "the failure looks unrelated" and
+  not "it was green last week". If a check is red, the pull request is not ready.
+  Re-run it or say why the result does not apply.
+- **No self-merge of unreviewed work.** Changes touching the ledger, the pricing
+  or the journal layout are the billing record and get a second pair of eyes.
+
+### A note on CI on this repository
+
+GitHub Actions is currently not running here: the account is locked over a
+billing issue, so jobs fail to start rather than report a result. That is a
+billing problem, not a green build, and the README says so.
+
+Until it is resolved, `scripts/verify.sh` is the gate. Treat its summary as the
+required evidence on every pull request, and do not read the absence of a red X
+on a pull request as approval. Fixing the billing is what turns this from a
+convention into an enforced check.
 
 ## Tests
 
