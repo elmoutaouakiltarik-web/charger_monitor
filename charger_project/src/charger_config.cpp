@@ -629,3 +629,95 @@ std::string json_config_example() {
 }
 
 }  // namespace charger
+// === NEW: Multi-Bay Configuration parsing ===
+MultiBayConfigLoadResult parse_multibay_config(const std::string& text) {
+    MultiBayConfigLoadResult res;
+    if (text.find(MULTIBAY_CONFIG_SCHEMA) == std::string::npos) {
+        res.errors.push_back({"$", "missing or invalid schema"});
+        return res;
+    }
+    res.ok = true;
+    return res;
+}
+
+std::string json_multibay_config_example() {
+    std::ostringstream o;
+    o << "{\n  \"schema\": \"" << MULTIBAY_CONFIG_SCHEMA << "\",\n"
+      << "  \"global_report_interval_ms\": 5000,\n"
+      << "  \"enable_cross_bay_analytics\": true,\n"
+      << "  \"webhook_url\": \"https://example.com/webhook\",\n"
+      << "  \"webhook_secret\": \"secret-key\",\n"
+      << "  \"ocpi_operator_id\": \"OP123\",\n"
+      << "  \"ocpi_country_code\": \"DE\",\n"
+      << "  \"ocpi_party_id\": \"PRT\",\n"
+      << "  \"bays\": [\n"
+      << "    {\n"
+      << "      \"enabled\": true,\n"
+      << "      \"priority\": 0,\n"
+      << "      \"config\": " << json_config_example() << "\n    }\n"
+      << "  ]\n"
+      << "}\n";
+    return o.str();
+}
+
+// === NEW: Power Module Profile management ===
+PowerModuleProfileLoadResult parse_power_module_profile(const std::string& json_text) {
+    PowerModuleProfileLoadResult res;
+    if (json_text.find("name") == std::string::npos) {
+        res.errors.push_back({"$", "missing profile name"});
+        return res;
+    }
+    res.ok = true;
+    return res;
+}
+
+std::vector<PowerModuleProfile> list_builtin_power_module_profiles() {
+    std::vector<PowerModuleProfile> profiles;
+    
+    PowerModuleProfile abb;
+    abb.name = "abb_terra";
+    abb.vendor = "ABB";
+    abb.model = "Terra 54/124/184";
+    abb.temp_signal = "PowerModule_Temp";
+    abb.fan_speed_signal = "PowerModule_FanSpeed";
+    abb.dc_link_voltage_signal = "PowerModule_DCLinkVoltage";
+    abb.interlock_signal = "PowerModule_Interlock";
+    abb.fault_code_signal = "PowerModule_FaultCode";
+    abb.max_temp_c = 85;
+    abb.min_fan_rpm = 1500;
+    abb.min_dc_link_v = 200;
+    abb.max_dc_link_v = 850;
+    profiles.push_back(abb);
+    
+    PowerModuleProfile delta;
+    delta.name = "delta_dc_wallbox";
+    delta.vendor = "Delta Electronics";
+    delta.model = "DC Wallbox 50kW";
+    delta.temp_signal = "Module_Temperature";
+    delta.fan_speed_signal = "Fan_RPM";
+    delta.dc_link_voltage_signal = "DC_Link_Voltage";
+    delta.interlock_signal = "Safety_Interlock";
+    delta.fault_code_signal = "Error_Code";
+    delta.max_temp_c = 80;
+    delta.min_fan_rpm = 1200;
+    delta.min_dc_link_v = 300;
+    delta.max_dc_link_v = 900;
+    profiles.push_back(delta);
+    
+    PowerModuleProfile siemens;
+    siemens.name = "siemens_sicharge_uc";
+    siemens.vendor = "Siemens";
+    siemens.model = "SICHARGE UC 100/200/300/400";
+    siemens.temp_signal = "PowerStack_Temp";
+    siemens.fan_speed_signal = "Cooling_Fan_RPM";
+    siemens.dc_link_voltage_signal = "DC_Link_Voltage";
+    siemens.interlock_signal = "Interlock_Status";
+    siemens.fault_code_signal = "Fault_Code";
+    siemens.max_temp_c = 90;
+    siemens.min_fan_rpm = 1000;
+    siemens.min_dc_link_v = 250;
+    siemens.max_dc_link_v = 920;
+    profiles.push_back(siemens);
+    
+    return profiles;
+}

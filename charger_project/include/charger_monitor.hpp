@@ -10,8 +10,11 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace charger {

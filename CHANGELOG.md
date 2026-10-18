@@ -168,10 +168,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Documentation
 
-- The repository card, the architecture map, the session lifecycle, the
-  integer-exactness comparison and the operator KPI view are generated from
-  `scripts/make_images.py`. Figures quoted in the README therefore come from
-  the same source as the diagrams.
+- The repository card, the architecture map, the session lifecycle and the
+  integer-exactness comparison are generated from `scripts/make_images.py`.
+  Figures quoted in the README therefore come from the same source as the
+  diagrams.
 
 ## [1.3.0]
 
