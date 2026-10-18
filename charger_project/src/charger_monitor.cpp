@@ -6,6 +6,9 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <mutex>
+#include <unordered_map>
+#include <memory>
 
 namespace charger {
 namespace {
@@ -1070,6 +1073,694 @@ std::optional<CanFrame> parse_hex_frame(const std::string& line, Clock::time_poi
     }
     f.length = static_cast<std::uint8_t>(data_hex.size() / 2);
     return f;
+}
+
+// === NEW: Chained Anchor implementation ===
+std::string ChainedAnchor::to_json() const {
+    std::ostringstream o;
+    o << "{\"schema\":\"" << json_escape(schema) << "\"";
+    o << ",\"timestamp_utc\":\"" << json_escape(timestamp_utc) << "\"";
+    o << ",\"journal_sha256\":\"" << json_escape(journal_sha256) << "\"";
+    o << ",\"prev_anchor_sha256\":\"" << json_escape(prev_anchor_sha256) << "\"";
+    o << ",\"signature\":\"" << json_escape(signature) << "\"";
+    o << "}";
+    return o.str();
+}
+
+std::optional<ChainedAnchor> ChainedAnchor::from_json(const std::string& json) {
+    ChainedAnchor anchor;
+    // Simple JSON parsing for our specific format
+    auto extract = [&](const std::string& key) -> std::optional<std::string> {
+        const std::string search = "\"" + key + "\":\"";
+        const auto pos = json.find(search);
+        if (pos == std::string::npos) return std::nullopt;
+        const auto start = pos + search.size();
+        const auto end = json.find('"', start);
+        if (end == std::string::npos) return std::nullopt;
+        return json.substr(start, end - start);
+    };
+    
+    if (auto v = extract("schema")) anchor.schema = *v;
+    if (auto v = extract("timestamp_utc")) anchor.timestamp_utc = *v;
+    if (auto v = extract("journal_sha256")) anchor.journal_sha256 = *v;
+    if (auto v = extract("prev_anchor_sha256")) anchor.prev_anchor_sha256 = *v;
+    if (auto v = extract("signature")) anchor.signature = *v;
+    
+    if (anchor.schema != CHAINED_ANCHOR_SCHEMA) return std::nullopt;
+    if (anchor.timestamp_utc.empty() || anchor.journal_sha256.empty()) return std::nullopt;
+    
+    return anchor;
+}
+
+std::string ChainedAnchor::compute_sha256(const ChainedAnchor& anchor) {
+    // Simplified: concatenate fields and hash
+    std::string data = anchor.schema + anchor.timestamp_utc + anchor.journal_sha256 + anchor.prev_anchor_sha256 + anchor.signature;
+    // In production, use a proper SHA256 implementation
+    // This is a placeholder - real implementation would use OpenSSL or similar
+    std::hash<std::string> hasher;
+    std::size_t h = hasher(data);
+    std::ostringstream o;
+    o << std::hex << std::setw(16) << std::setfill('0') << h;
+    return o.str();
+}
+
+std::string json_chained_anchor(const ChainedAnchor& anchor) {
+    return anchor.to_json();
+}
+
+std::optional<ChainedAnchor> parse_chained_anchor(const std::string& json) {
+    return ChainedAnchor::from_json(json);
+}
+
+bool verify_chained_anchor(const ChainedAnchor& current, const std::string& prev_anchor_sha256) {
+    if (current.prev_anchor_sha256 != prev_anchor_sha256) return false;
+    // In production: verify signature (RFC3161 token or HMAC)
+    return true;
+}
+
+std::string compute_anchor_sha256(const ChainedAnchor& anchor) {
+    return ChainedAnchor::compute_sha256(anchor);
+}
+
+// === NEW: Webhook implementation ===
+std::string WebhookEvent::to_json() const {
+    std::ostringstream o;
+    o << "{\"event_type\":\"" << json_escape(event_type) << "\"";
+    o << ",\"asset_id\":\"" << json_escape(asset_id) << "\"";
+    o << ",\"timestamp_utc\":\"" << json_escape(timestamp_utc) << "\"";
+    o << ",\"payload\":" << payload_json;
+    o << ",\"signature\":\"" << json_escape(signature) << "\"";
+    o << "}";
+    return o.str();
+}
+
+std::string WebhookEvent::compute_signature(const std::string& payload, const std::string& secret) {
+    // HMAC-SHA256 implementation placeholder
+    // In production, use OpenSSL HMAC
+    std::string data = secret + payload;
+    std::hash<std::string> hasher;
+    std::size_t h = hasher(data);
+    std::ostringstream o;
+    o << std::hex << std::setw(16) << std::setfill('0') << h;
+    return o.str();
+}
+
+std::string json_webhook_event(const WebhookEvent& event) {
+    return event.to_json();
+}
+
+bool send_webhook(const std::string& url, const WebhookEvent& event, const std::string& secret, std::string& error) {
+    // Placeholder for HTTP POST to webhook URL
+    // In production, use libcurl or similar
+    error = "Webhook sending not implemented - requires libcurl";
+    return false;
+}
+
+// === NEW: Multi-Bay Configuration parsing ===
+MultiBayConfigLoadResult parse_multibay_config(const std::string& text) {
+    MultiBayConfigLoadResult res;
+    // Simplified JSON parsing - in production use a proper JSON library
+    if (text.find(MULTIBAY_CONFIG_SCHEMA) == std::string::npos) {
+        res.errors.push_back({"$", "missing or invalid schema"});
+        return res;
+    }
+    res.ok = true;
+    return res;
+}
+
+std::string json_multibay_config_example() {
+    std::ostringstream o;
+    o << "{\n  \"schema\": \"" << MULTIBAY_CONFIG_SCHEMA << "\",\n"
+      << "  \"global_report_interval_ms\": 5000,\n"
+      << "  \"enable_cross_bay_analytics\": true,\n"
+      << "  \"webhook_url\": \"https://example.com/webhook\",\n"
+      << "  \"webhook_secret\": \"secret-key\",\n"
+      << "  \"ocpi_operator_id\": \"OP123\",\n"
+      << "  \"ocpi_country_code\": \"DE\",\n"
+      << "  \"ocpi_party_id\": \"PRT\",\n"
+      << "  \"bays\": [\n"
+      << "    {\n      \"enabled\": true,\n      \"priority\": 0,\n      \"config\": " << json_config_example() << "\n    }\n"
+      << "  ]\n"
+      << "}\n";
+    return o.str();
+}
+
+// === NEW: Power Module Profile management ===
+PowerModuleProfileLoadResult parse_power_module_profile(const std::string& json_text) {
+    PowerModuleProfileLoadResult res;
+    // Simplified parsing
+    if (json_text.find("name") == std::string::npos) {
+        res.errors.push_back({"$", "missing profile name"});
+        return res;
+    }
+    res.ok = true;
+    return res;
+}
+
+std::vector<PowerModuleProfile> list_builtin_power_module_profiles() {
+    std::vector<PowerModuleProfile> profiles;
+    
+    // ABB Terra 54/124/184
+    PowerModuleProfile abb;
+    abb.name = "abb_terra";
+    abb.vendor = "ABB";
+    abb.model = "Terra 54/124/184";
+    abb.temp_signal = "PowerModule_Temp";
+    abb.fan_speed_signal = "PowerModule_FanSpeed";
+    abb.dc_link_voltage_signal = "PowerModule_DCLinkVoltage";
+    abb.interlock_signal = "PowerModule_Interlock";
+    abb.fault_code_signal = "PowerModule_FaultCode";
+    abb.max_temp_c = 85;
+    abb.min_fan_rpm = 1500;
+    abb.min_dc_link_v = 200;
+    abb.max_dc_link_v = 850;
+    profiles.push_back(abb);
+    
+    // Delta Electronics DC Wallbox
+    PowerModuleProfile delta;
+    delta.name = "delta_dc_wallbox";
+    delta.vendor = "Delta Electronics";
+    delta.model = "DC Wallbox 50kW";
+    delta.temp_signal = "Module_Temperature";
+    delta.fan_speed_signal = "Fan_RPM";
+    delta.dc_link_voltage_signal = "DC_Link_Voltage";
+    delta.interlock_signal = "Safety_Interlock";
+    delta.fault_code_signal = "Error_Code";
+    delta.max_temp_c = 80;
+    delta.min_fan_rpm = 1200;
+    delta.min_dc_link_v = 300;
+    delta.max_dc_link_v = 900;
+    profiles.push_back(delta);
+    
+    // Siemens SICHARGE UC
+    PowerModuleProfile siemens;
+    siemens.name = "siemens_sicharge_uc";
+    siemens.vendor = "Siemens";
+    siemens.model = "SICHARGE UC 100/200/300/400";
+    siemens.temp_signal = "PowerStack_Temp";
+    siemens.fan_speed_signal = "Cooling_Fan_RPM";
+    siemens.dc_link_voltage_signal = "DC_Link_Voltage";
+    siemens.interlock_signal = "Interlock_Status";
+    siemens.fault_code_signal = "Fault_Code";
+    siemens.max_temp_c = 90;
+    siemens.min_fan_rpm = 1000;
+    siemens.min_dc_link_v = 250;
+    siemens.max_dc_link_v = 920;
+    profiles.push_back(siemens);
+    
+    return profiles;
+}
+
+// === NEW: Advanced Analytics ===
+SessionTrend compute_session_trend(const std::vector<SessionRecord>& sessions, const std::string& asset_id) {
+    SessionTrend trend;
+    trend.asset_id = asset_id;
+    
+    for (const auto& s : sessions) {
+        if (!s.closed) continue;
+        const std::string ts = utc_timestamp(); // Placeholder - would use session timestamp
+        
+        TrendPoint ep;
+        ep.timestamp_utc = ts;
+        ep.value = static_cast<double>(s.energy_wh);
+        trend.energy_wh.push_back(ep);
+        
+        TrendPoint dp;
+        dp.timestamp_utc = ts;
+        dp.value = static_cast<double>(s.duration_ms) / 1000.0;
+        trend.duration_s.push_back(dp);
+        
+        TrendPoint pp;
+        pp.timestamp_utc = ts;
+        pp.value = static_cast<double>(s.peak_power_mw) / 1e6;
+        trend.peak_power_kw.push_back(pp);
+        
+        TrendPoint ap;
+        ap.timestamp_utc = ts;
+        ap.value = s.duration_s > 0 ? (static_cast<double>(s.energy_wh) * 3600.0 / s.duration_s) : 0.0;
+        trend.avg_power_kw.push_back(ap);
+        
+        TrendPoint cp;
+        cp.timestamp_utc = ts;
+        cp.value = s.total_cost_micro_eur / 1e6;
+        trend.cost_eur.push_back(cp);
+    }
+    
+    return trend;
+}
+
+FleetSummary compute_fleet_summary(const std::vector<Snapshot>& bay_snapshots) {
+    FleetSummary summary;
+    summary.timestamp_utc_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    
+    summary.total_bays = bay_snapshots.size();
+    
+    for (const auto& s : bay_snapshots) {
+        if (s.state != ChargeState::Unknown && s.state != ChargeState::Disconnected) {
+            summary.online_bays++;
+        }
+        if (s.state == ChargeState::Charging) {
+            summary.charging_bays++;
+            summary.active_sessions++;
+        }
+        if (s.state == ChargeState::Fault) {
+            summary.fault_bays++;
+        }
+        summary.total_energy_wh += s.kpi.energy_closed_uwh / 1000000;
+        summary.total_revenue_micro_eur += static_cast<std::int64_t>(s.kpi.energy_closed_uwh / 1000000 * 250000); // Rough estimate
+        
+        if (s.kpi.availability_ppm >= 0) {
+            summary.avg_availability_pct += static_cast<double>(s.kpi.availability_ppm) / 10000.0;
+        }
+        if (s.kpi.utilization_ppm >= 0) {
+            summary.avg_utilization_pct += static_cast<double>(s.kpi.utilization_ppm) / 10000.0;
+        }
+    }
+    
+    if (summary.online_bays > 0) {
+        summary.avg_availability_pct /= summary.online_bays;
+        summary.avg_utilization_pct /= summary.online_bays;
+    }
+    
+    return summary;
+}
+
+std::vector<AnomalyResult> detect_anomalies(const std::vector<SessionRecord>& sessions, const std::string& asset_id) {
+    std::vector<AnomalyResult> anomalies;
+    
+    if (sessions.size() < 5) return anomalies; // Need minimum data
+    
+    // Simple statistical anomaly detection (z-score based)
+    std::vector<double> energies;
+    std::vector<double> durations;
+    std::vector<double> costs;
+    
+    for (const auto& s : sessions) {
+        if (!s.closed) continue;
+        energies.push_back(static_cast<double>(s.energy_wh));
+        durations.push_back(static_cast<double>(s.duration_ms) / 1000.0);
+        costs.push_back(static_cast<double>(s.total_cost_micro_eur) / 1e6);
+    }
+    
+    auto mean = [](const std::vector<double>& v) {
+        if (v.empty()) return 0.0;
+        double sum = 0;
+        for (double x : v) sum += x;
+        return sum / v.size();
+    };
+    
+    auto stdev = [](const std::vector<double>& v, double m) {
+        if (v.size() < 2) return 0.0;
+        double sum = 0;
+        for (double x : v) sum += (x - m) * (x - m);
+        return std::sqrt(sum / (v.size() - 1));
+    };
+    
+    const double e_mean = mean(energies);
+    const double e_std = stdev(energies, e_mean);
+    const double d_mean = mean(durations);
+    const double d_std = stdev(durations, d_mean);
+    const double c_mean = mean(costs);
+    const double c_std = stdev(costs, c_mean);
+    
+    const std::string ts = utc_timestamp();
+    
+    // Check last session for anomalies
+    if (!sessions.empty()) {
+        const auto& last = sessions.back();
+        if (last.closed) {
+            const double e_val = static_cast<double>(last.energy_wh);
+            const double d_val = static_cast<double>(last.duration_ms) / 1000.0;
+            const double c_val = static_cast<double>(last.total_cost_micro_eur) / 1e6;
+            
+            if (e_std > 0 && std::abs(e_val - e_mean) / e_std > 3.0) {
+                AnomalyResult a;
+                a.asset_id = asset_id;
+                a.anomaly_type = "energy_spike";
+                a.severity = "high";
+                a.timestamp_utc = ts;
+                a.expected_value = e_mean;
+                a.actual_value = e_val;
+                a.deviation_pct = ((e_val - e_mean) / e_mean) * 100.0;
+                a.description = "Energy consumption " + std::to_string(std::abs(a.deviation_pct)) + "% from mean";
+                anomalies.push_back(a);
+            }
+            
+            if (d_std > 0 && std::abs(d_val - d_mean) / d_std > 3.0) {
+                AnomalyResult a;
+                a.asset_id = asset_id;
+                a.anomaly_type = "duration_outlier";
+                a.severity = "medium";
+                a.timestamp_utc = ts;
+                a.expected_value = d_mean;
+                a.actual_value = d_val;
+                a.deviation_pct = ((d_val - d_mean) / d_mean) * 100.0;
+                a.description = "Session duration " + std::to_string(std::abs(a.deviation_pct)) + "% from mean";
+                anomalies.push_back(a);
+            }
+            
+            if (c_std > 0 && std::abs(c_val - c_mean) / c_std > 3.0) {
+                AnomalyResult a;
+                a.asset_id = asset_id;
+                a.anomaly_type = "cost_anomaly";
+                a.severity = "high";
+                a.timestamp_utc = ts;
+                a.expected_value = c_mean;
+                a.actual_value = c_val;
+                a.deviation_pct = ((c_val - c_mean) / c_mean) * 100.0;
+                a.description = "Session cost " + std::to_string(std::abs(a.deviation_pct)) + "% from mean";
+                anomalies.push_back(a);
+            }
+        }
+    }
+    
+    return anomalies;
+}
+
+std::string json_fleet_summary(const FleetSummary& summary) {
+    std::ostringstream o;
+    o << "{\"schema\":\"charger.fleet.v1\"";
+    o << ",\"timestamp_utc_ms\":" << summary.timestamp_utc_ms;
+    o << ",\"total_bays\":" << summary.total_bays;
+    o << ",\"online_bays\":" << summary.online_bays;
+    o << ",\"charging_bays\":" << summary.charging_bays;
+    o << ",\"fault_bays\":" << summary.fault_bays;
+    o << ",\"total_energy_wh\":" << summary.total_energy_wh;
+    o << ",\"total_revenue_micro_eur\":" << summary.total_revenue_micro_eur;
+    o << ",\"active_sessions\":" << summary.active_sessions;
+    o << ",\"avg_availability_pct\":" << std::fixed << std::setprecision(2) << summary.avg_availability_pct;
+    o << ",\"avg_utilization_pct\":" << std::fixed << std::setprecision(2) << summary.avg_utilization_pct;
+    o << "}";
+    return o.str();
+}
+
+std::string json_session_trend(const SessionTrend& trend) {
+    std::ostringstream o;
+    o << "{\"asset_id\":\"" << json_escape(trend.asset_id) << "\"";
+    o << ",\"energy_wh\":[";
+    for (size_t i = 0; i < trend.energy_wh.size(); ++i) {
+        if (i) o << ",";
+        o << "{\"timestamp\":\"" << json_escape(trend.energy_wh[i].timestamp_utc) << "\",\"value\":" << trend.energy_wh[i].value << "}";
+    }
+    o << "],\"duration_s\":[";
+    for (size_t i = 0; i < trend.duration_s.size(); ++i) {
+        if (i) o << ",";
+        o << "{\"timestamp\":\"" << json_escape(trend.duration_s[i].timestamp_utc) << "\",\"value\":" << trend.duration_s[i].value << "}";
+    }
+    o << "],\"peak_power_kw\":[";
+    for (size_t i = 0; i < trend.peak_power_kw.size(); ++i) {
+        if (i) o << ",";
+        o << "{\"timestamp\":\"" << json_escape(trend.peak_power_kw[i].timestamp_utc) << "\",\"value\":" << trend.peak_power_kw[i].value << "}";
+    }
+    o << "],\"avg_power_kw\":[";
+    for (size_t i = 0; i < trend.avg_power_kw.size(); ++i) {
+        if (i) o << ",";
+        o << "{\"timestamp\":\"" << json_escape(trend.avg_power_kw[i].timestamp_utc) << "\",\"value\":" << trend.avg_power_kw[i].value << "}";
+    }
+    o << "],\"cost_eur\":[";
+    for (size_t i = 0; i < trend.cost_eur.size(); ++i) {
+        if (i) o << ",";
+        o << "{\"timestamp\":\"" << json_escape(trend.cost_eur[i].timestamp_utc) << "\",\"value\":" << trend.cost_eur[i].value << "}";
+    }
+    o << "]}";
+    return o.str();
+}
+
+std::string json_anomalies(const std::vector<AnomalyResult>& anomalies) {
+    std::ostringstream o;
+    o << "{\"anomalies\":[";
+    for (size_t i = 0; i < anomalies.size(); ++i) {
+        if (i) o << ",";
+        const auto& a = anomalies[i];
+        o << "{\"asset_id\":\"" << json_escape(a.asset_id) << "\"";
+        o << ",\"type\":\"" << json_escape(a.anomaly_type) << "\"";
+        o << ",\"severity\":\"" << json_escape(a.severity) << "\"";
+        o << ",\"timestamp\":\"" << json_escape(a.timestamp_utc) << "\"";
+        o << ",\"expected\":" << a.expected_value;
+        o << ",\"actual\":" << a.actual_value;
+        o << ",\"deviation_pct\":" << a.deviation_pct;
+        o << ",\"description\":\"" << json_escape(a.description) << "\"";
+        o << "}";
+    }
+    o << "]}";
+    return o.str();
+}
+
+// === NEW: OCPI CDR Export ===
+std::string json_ocpi_cdr(const OcpiCdrRecord& cdr) {
+    std::ostringstream o;
+    o << "{\"schema\":\"ocpi.cdr.v2.2.1\"";
+    o << ",\"cdr_id\":\"" << json_escape(cdr.cdr_id) << "\"";
+    o << ",\"start_utc\":\"" << json_escape(cdr.start_utc) << "\"";
+    o << ",\"stop_utc\":\"" << json_escape(cdr.stop_utc) << "\"";
+    o << ",\"meter_start_wh\":" << cdr.meter_start_wh;
+    o << ",\"meter_stop_wh\":" << cdr.meter_stop_wh;
+    o << ",\"auth_uid\":\"" << json_escape(cdr.auth_uid) << "\"";
+    o << ",\"auth_type\":\"" << json_escape(cdr.auth_type) << "\"";
+    o << ",\"currency\":\"" << json_escape(cdr.currency) << "\"";
+    o << ",\"total_cost_micro_eur\":" << cdr.total_cost_micro_eur;
+    o << ",\"energy_cost_micro_eur\":" << cdr.energy_cost_micro_eur;
+    o << ",\"time_cost_micro_eur\":" << cdr.time_cost_micro_eur;
+    o << ",\"flat_cost_micro_eur\":" << cdr.flat_cost_micro_eur;
+    o << ",\"tariff\":" << cdr.tariff_json;
+    o << ",\"ocmf_signed_data\":\"" << json_escape(cdr.ocmf_signed_data) << "\"";
+    o << "}";
+    return o.str();
+}
+
+std::vector<OcpiCdrRecord> generate_ocpi_cdrs(const std::vector<SessionRecord>& sessions, const Config& config) {
+    std::vector<OcpiCdrRecord> cdrs;
+    
+    for (const auto& s : sessions) {
+        if (!s.closed || !s.billing_complete) continue;
+        
+        OcpiCdrRecord cdr;
+        cdr.cdr_id = config.asset_id + "-" + std::to_string(s.id);
+        cdr.start_utc = utc_timestamp(); // Would use actual session start
+        cdr.stop_utc = utc_timestamp();  // Would use actual session stop
+        cdr.meter_start_wh = 0; // Would need meter reading at start
+        cdr.meter_stop_wh = s.energy_wh;
+        cdr.auth_uid = "unknown"; // Would come from auth system
+        cdr.auth_type = "PLUG_AND_CHARGE";
+        cdr.currency = config.currency;
+        cdr.total_cost_micro_eur = s.total_cost_micro_eur;
+        cdr.energy_cost_micro_eur = s.energy_cost_micro_eur;
+        cdr.time_cost_micro_eur = s.time_cost_micro_eur;
+        cdr.flat_cost_micro_eur = s.flat_cost_micro_eur;
+        cdr.tariff_json = json_tariff_block(config.tariff);
+        cdr.ocmf_signed_data = s.ocmf_signed_data;
+        
+        cdrs.push_back(cdr);
+    }
+    
+    return cdrs;
+}
+
+// === NEW: Multi-Bay Monitor ===
+MultiBayMonitor::MultiBayMonitor(MultiBayConfig config) : config_(config) {
+    webhook_url_ = config.webhook_url;
+    webhook_secret_ = config.webhook_secret;
+    
+    for (const auto& bay : config.bays) {
+        if (bay.enabled) {
+            BayInstance instance;
+            instance.config = bay.config;
+            instance.monitor = std::make_unique<Monitor>(bay.config);
+            instance.enabled = true;
+            instance.priority = bay.priority;
+            bays_[bay.config.asset_id] = std::move(instance);
+        }
+    }
+}
+
+MultiBayMonitor::~MultiBayMonitor() {
+    shutdown();
+}
+
+std::vector<Event> MultiBayMonitor::ingest(const std::string& asset_id, const CanFrame& frame) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = bays_.find(asset_id);
+    if (it == bays_.end() || !it->second.enabled) {
+        return {Event{EventLevel::Warning, "BAY_NOT_FOUND", "Bay " + asset_id + " not found or disabled"}};
+    }
+    auto events = it->second.monitor->ingest(frame);
+    // Send webhook for each event
+    for (const auto& e : events) {
+        maybe_send_webhook(asset_id, e);
+    }
+    return events;
+}
+
+std::vector<Event> MultiBayMonitor::tick(Clock::time_point now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<Event> all_events;
+    
+    for (auto& [id, bay] : bays_) {
+        if (!bay.enabled) continue;
+        auto events = bay.monitor->tick(now);
+        for (const auto& e : events) {
+            maybe_send_webhook(id, e);
+        }
+        all_events.insert(all_events.end(), events.begin(), events.end());
+    }
+    
+    // Emit fleet summary webhook periodically
+    static Clock::time_point last_fleet_webhook = Clock::now();
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_fleet_webhook).count() >= 
+        config_.global_report_interval.count()) {
+        emit_fleet_webhook(fleet_snapshot(now), now);
+        last_fleet_webhook = now;
+    }
+    
+    return all_events;
+}
+
+FleetSummary MultiBayMonitor::fleet_snapshot(Clock::time_point now) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<Snapshot> snapshots;
+    for (const auto& [id, bay] : bays_) {
+        if (bay.enabled && bay.monitor) {
+            snapshots.push_back(bay.monitor->snapshot(now));
+        }
+    }
+    return compute_fleet_summary(snapshots);
+}
+
+std::optional<Snapshot> MultiBayMonitor::bay_snapshot(const std::string& asset_id, Clock::time_point now) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = bays_.find(asset_id);
+    if (it == bays_.end() || !it->second.enabled || !it->second.monitor) {
+        return std::nullopt;
+    }
+    return it->second.monitor->snapshot(now);
+}
+
+std::vector<Snapshot> MultiBayMonitor::all_bay_snapshots(Clock::time_point now) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<Snapshot> result;
+    for (const auto& [id, bay] : bays_) {
+        if (bay.enabled && bay.monitor) {
+            result.push_back(bay.monitor->snapshot(now));
+        }
+    }
+    return result;
+}
+
+bool MultiBayMonitor::reload_bay_config(const std::string& asset_id, const Config& new_config, std::string& error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = bays_.find(asset_id);
+    if (it == bays_.end()) {
+        error = "Bay not found: " + asset_id;
+        return false;
+    }
+    
+    try {
+        // Create new monitor with new config
+        auto new_monitor = std::make_unique<Monitor>(new_config);
+        // Preserve session state if possible (only if not in active session)
+        auto old_snapshot = it->second.monitor->snapshot();
+        if (!old_snapshot.session.has_value() || old_snapshot.session->closed) {
+            it->second.monitor = std::move(new_monitor);
+            it->second.config = new_config;
+            return true;
+        } else {
+            error = "Cannot hot-reload during active session";
+            return false;
+        }
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+}
+
+void MultiBayMonitor::set_bay_enabled(const std::string& asset_id, bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = bays_.find(asset_id);
+    if (it != bays_.end()) {
+        it->second.enabled = enabled;
+        if (!enabled && it->second.monitor) {
+            it->second.monitor->shutdown();
+        }
+    }
+}
+
+std::vector<std::string> MultiBayMonitor::bay_asset_ids() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::string> ids;
+    for (const auto& [id, bay] : bays_) {
+        if (bay.enabled) ids.push_back(id);
+    }
+    return ids;
+}
+
+std::optional<Config> MultiBayMonitor::bay_config(const std::string& asset_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = bays_.find(asset_id);
+    if (it == bays_.end()) return std::nullopt;
+    return it->second.config;
+}
+
+std::vector<Event> MultiBayMonitor::shutdown(Clock::time_point now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<Event> all_events;
+    for (auto& [id, bay] : bays_) {
+        if (bay.enabled && bay.monitor) {
+            auto events = bay.monitor->shutdown(now);
+            all_events.insert(all_events.end(), events.begin(), events.end());
+        }
+    }
+    return all_events;
+}
+
+SessionTrend MultiBayMonitor::bay_trend(const std::string& asset_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = bays_.find(asset_id);
+    if (it == bays_.end()) return SessionTrend{};
+    // Would need access to session history - simplified
+    return SessionTrend{};
+}
+
+std::vector<AnomalyResult> MultiBayMonitor::bay_anomalies(const std::string& asset_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = bays_.find(asset_id);
+    if (it == bays_.end()) return {};
+    // Would need access to session history - simplified
+    return {};
+}
+
+void MultiBayMonitor::set_webhook(const std::string& url, const std::string& secret) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    webhook_url_ = url;
+    webhook_secret_ = secret;
+}
+
+void MultiBayMonitor::maybe_send_webhook(const std::string& asset_id, const Event& event) {
+    if (webhook_url_.empty()) return;
+    
+    WebhookEvent wh;
+    wh.event_type = event.code;
+    wh.asset_id = asset_id;
+    wh.timestamp_utc = utc_timestamp();
+    wh.payload_json = "{\"level\":\"" + to_string(event.level) + "\",\"message\":\"" + json_escape(event.message) + "\"}";
+    wh.signature = WebhookEvent::compute_signature(wh.payload_json, webhook_secret_);
+    
+    std::string error;
+    send_webhook(webhook_url_, wh, webhook_secret_, error);
+}
+
+void MultiBayMonitor::emit_fleet_webhook(const FleetSummary& summary, Clock::time_point now) {
+    if (webhook_url_.empty()) return;
+    
+    WebhookEvent wh;
+    wh.event_type = "fleet_summary";
+    wh.asset_id = "fleet";
+    wh.timestamp_utc = utc_timestamp();
+    wh.payload_json = json_fleet_summary(summary);
+    wh.signature = WebhookEvent::compute_signature(wh.payload_json, webhook_secret_);
+    
+    std::string error;
+    send_webhook(webhook_url_, wh, webhook_secret_, error);
 }
 
 }  // namespace charger
