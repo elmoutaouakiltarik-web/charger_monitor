@@ -23,7 +23,6 @@ compile_commands.json
 *~
 
 # Tooling artefacts
-# .freebuff/  (remove if present — external tooling directory)
 
 # OS noise
 .DS_Store
