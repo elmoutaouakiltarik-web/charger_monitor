@@ -393,11 +393,13 @@ zero-dependency property or the read-only boundary is not on the list.
 - [x] Read-only control room, atomic status files, Prometheus textfile metrics
 - [x] `candump` replay with recorded time, commissioning probe
 - [x] Meter reconciliation, OCPP 2.0.1 `TransactionEvent` export (file, no transport)
-- [ ] An OCPI-conformant CDR export with operator-supplied party, token and location
-- [ ] `signed_data` pass-through for OCMF from a certified meter (no signature verification: that stays with transparency software)
-- [ ] Power-module CAN profiles from vendor DBCs (cabinet-internal bus)
-- [ ] Multi-bay aggregation from a single process
-- [ ] Chained anchors (`prev_anchor_sha256`) so deleting an anchor is detectable
+- [x] OCPI CDR export with operator-supplied party and location metadata; session start from the journal where recorded, labelled close-minus-duration derivation otherwise
+- [x] OCMF `signed_data` pass-through from a certified meter (the payload is preserved verbatim in the journal; signature verification stays with transparency software, see ROADMAP)
+- [x] Power-module profiles from a vendor DBC, **operator-supplied** (thresholds and signal mappings describe one installation; the library ships none built in)
+- [x] Multi-bay monitoring and aggregation from a single process (config-file driven, strict parsing, located errors)
+- [x] Chained anchors (`prev_anchor_sha256`) with HMAC-SHA256 signatures and end-to-end verification, so deleting or rewriting an anchor is detectable
+- [x] Webhook event streaming with HMAC-SHA256 signatures (RFC 4231 tested); plain HTTP delivery, TLS by reverse proxy
+- [x] Statistical analytics: per-session trend series, explainable leave-one-out anomaly detection, fleet summary
 
 ## License
 

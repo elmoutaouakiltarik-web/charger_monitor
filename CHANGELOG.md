@@ -5,9 +5,77 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.0.0] — 2026-10-19
+
+### Changed
+
+- **Version aligned at 2.0.0 across every source of truth**: CMake `project()`,
+  `charger_monitor.hpp` `VERSION`, `CITATION.cff`, the SBOM and the demo
+  goldens. Previous releases shipped two different versions at once.
+- **Webhook signatures are real HMAC-SHA256.** The earlier draft signed with
+  `std::hash` — a 64-bit, non-cryptographic, implementation-defined digest —
+  while calling the result HMAC-SHA256. The wire format is unchanged
+  (`sha256=<hex>`), but every previously "signed" event must be re-signed;
+  nothing verifiable is lost because nothing was verifiable before.
+- **Chained anchors are signed with the same HMAC and verified end-to-end.**
+  `verify_chained_anchor()` now checks the signature over every field, the
+  link to the previous anchor's computed digest, and the binding to the
+  journal digest it names — instead of checking one field and returning
+  true. `compute_anchor_sha256()` is the journal's own SHA-256, so an anchor
+  commits to the exact journal bytes it certifies.
+- **Anomaly detection no longer includes the session under test in its own
+  baseline.** The earlier draft compared a session's energy against a mean
+  and spread computed over all sessions including it, which masks exactly
+  the outliers the detector exists to catch. The baseline is now the
+  leave-one-out history before the newest session, with sample standard
+  deviation; a perfectly constant baseline (zero spread) flags any
+  deviation instead of silently passing.
+- **Fleet summary revenue counts billable sessions only**, and an undefined
+  KPI (`-1 ppm`, no measurement window yet) is excluded from availability
+  and utilization averages instead of being counted as a zero.
 
 ### Added
+
+- Multi-bay monitoring in a single process (`charger.multibay.config.v1`):
+  one config file lists bays with their per-bay `Config`, priorities and
+  enable flags; `parse_multibay_config()` is a strict recursive-descent
+  parser that rejects unknown fields and reports errors with bay-indexed
+  paths. CLI: `--validate-multibay FILE`, `--print-multibay-example`.
+- Power-module profiles, operator-supplied (`charger.power-module.v1`):
+  signal-name mappings to the vendor DBC plus this installation's
+  thresholds. A mapped signal absent from the embedded DBC fails at load
+  time, so a typo cannot quietly report zero. **No built-in vendor profiles
+  ship**: thresholds and signal names describe a specific installation and
+  belong to its owner, not to the library. CLI: `--validate-profile FILE`,
+  `--print-profile-example`.
+- Journal electrical envelope: repeated energy and time captures are
+  cross-checked (delta tolerance, integration gap accounting) so a
+  duplicated meter reading cannot silently inflate a session.
+- OCPI CDR session start from the journal: sessions closed by a 2.0 writer
+  carry the measured `ocpi_start_utc` (labelled `"start_source":
+  "journal"`); older ones get `derive_start_utc()` (close minus measured
+  duration, labelled `"close-minus-duration"`). A dispute reviewer always
+  knows how the start was established.
+- Statistical analytics over the journal (CLI `--trend ASSET`,
+  `--anomalies ASSET`, `--fleet-summary`): per-session energy/duration/
+  power/cost series stamped with each session's recorded start, leave-one-out
+  z-score anomaly detection over the per-asset history (energy spike,
+  duration outlier, cost anomaly), and a fleet rollup with availability,
+  utilization, revenue and per-state bay counts. All explainable, no
+  machine learning; see ROADMAP.md for what is planned.
+- HMAC-SHA256 webhook events: `WebhookEvent::compute_signature()` signs
+  `event_type|asset_id|timestamp_utc|payload_json` with the shared secret
+  and `verify_webhook_event()` checks the envelope plus the signature.
+  Validated against the RFC 4231 published test vectors. Delivery speaks
+  plain HTTP only; TLS is by reverse proxy (documented, validated in
+  `webhook_url`).
+- `tests/test_v2.cpp`, the eleventh suite: RFC 4231 vectors, anchor chaining
+  and tamper cases, both new parsers, trend units, anomaly gates including
+  the constant-baseline case, fleet summary units, CDR shape.
+- `ROADMAP.md`: features claimed as working are separated from features
+  merely planned.
+
+### Added (previously unreleased 2.0 work)
 
 - File-based TOU tariff (`charger.tou.v1`): `parse_tou_json()` loads windows
   plus an optional catch-all fallback from a reviewable document, decimal
@@ -262,7 +330,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - Replay mode, libFuzzer harness, sanitizer builds, CMake presets.
 
-[Unreleased]: https://github.com/elmoutaouakiltarik-web/charger_monitor/compare/v1.4.0...HEAD
+[2.0.0]: https://github.com/elmoutaouakiltarik-web/charger_monitor/compare/v1.4.0...v2.0.0
 [1.4.0]: https://github.com/elmoutaouakiltarik-web/charger_monitor/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/elmoutaouakiltarik-web/charger_monitor/releases/tag/v1.3.0
 [1.2.0]: https://github.com/elmoutaouakiltarik-web/charger_monitor/compare/v1.2.0...v1.3.0
