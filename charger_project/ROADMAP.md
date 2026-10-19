@@ -4,22 +4,24 @@ The project's contract with its users: **everything claimed as working ships in
 this release**. Anything listed here is *not yet implemented*. A feature moves
 from this file to the changelog only when it has tests that fail without it.
 
-## Planned — v2.1
+## Planned — v2.2
 
 - **OCMF `signed_data` end-to-end verification.** The meter's OCMF payload is
   already passed through verbatim into session records (see
   `charger_monitor.hpp`, `SessionRecord.ocmf_signed_data`). Verifying the
   ECDSA signature chain against the public meter certificate requires an
-  ASN.1/DER reader; it is intentionally not half-done in v2.0. Until it
-  ships, the payload is treated as *unverified meter attestation*: present,
-  immutable in the journal, but not a substitute for reading the meter's
-  own audit log.
-- **Anomaly detection beyond z-score.** The shipped detector
-  (`detect_anomalies`) is a documented, tested leave-one-out z-score over the
-  per-asset history. Planned additions: IQR fences for skewed distributions,
-  cross-bay drift (one bay deviating from its twins), and per-connector
-  baselines. Machine-learning scoring stays out until the explainable layer
-  is proven in the field.
+  ASN.1/DER reader; it is intentionally not half-done. Until it ships, the
+  payload is treated as *unverified meter attestation*: present, immutable
+  in the journal, but not a substitute for reading the meter's own audit
+  log.
+- **Per-connector baselines for anomaly detection.** The z-score and IQR
+  detectors shipped in 2.0/2.1 reason over per-asset history and across
+  bays; baselining each connector separately (a DC bay serving both light
+  and heavy vehicles sees bimodal sessions) needs per-connector grouping
+  in the journal first.
+- **Anomaly scoring beyond explainable statistics.** Machine-learning
+  scoring stays out until the explainable layer (z-score, IQR, drift,
+  degradation) is proven in the field.
 
 ## Under consideration
 

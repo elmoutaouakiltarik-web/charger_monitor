@@ -409,6 +409,121 @@ void test_ocpi_cdr() {
     require(json.find("1500") != std::string::npos, "the CDR carries the metered energy");
 }
 
+// --------------------------------------------- IQR fences + fleet drift + degradation ---
+
+void test_iqr_fences() {
+    // A history whose single extreme session inflates the z-score baseline:
+    // mean 153, sample std ~157.4, so a 400 under test scores z~1.57 (no
+    // z-score gate). The Tukey fences survive the same outlier because
+    // quartiles barely move: Q1=96.25, Q3=117.5 (R-7), IQR=21.25, high fence
+    // 149.375 — and 400 is beyond the 3-IQR extreme line (181.25), so the
+    // severity escalates to critical. This is the case the second detector
+    // exists for: the first detector's own baseline is polluted by the
+    // history, the quartiles are not.
+    const double kwh[] = {80, 90, 95, 100, 100, 105, 110, 120, 130, 600};
+    std::vector<SessionRecord> history;
+    for (std::uint64_t i = 1; i <= 10; ++i) {
+        history.push_back(make_session(i, static_cast<std::uint64_t>(kwh[i - 1]), 60000, 250000,
+                                       "2026-10-19T11:0" + std::to_string(i) + ":00Z"));
+    }
+    history.push_back(make_session(11, 400, 60000, 250000, "2026-10-19T11:11:00Z"));
+
+    const auto anomalies = detect_anomalies(history, "bay-A");
+    require(anomalies.size() == 1,
+            "the polluted-baseline spike yields exactly one anomaly, got " + std::to_string(anomalies.size()));
+    const auto& a = anomalies.front();
+    require(a.method == "iqr", "the IQR detector fired, got " + a.method);
+    require(a.anomaly_type == "energy_spike", "the anomaly is an energy spike");
+    require(a.severity == "critical", "beyond the 3-IQR line the severity escalates, got " + a.severity);
+    require(std::abs(a.expected_value - 0.105) < 1e-9, "the IQR detector's expected value is the robust median");
+
+    // An in-band session on the same history: no anomaly from either detector.
+    std::vector<SessionRecord> calm = history;
+    calm.pop_back();
+    calm.push_back(make_session(11, 120, 60000, 250000, "2026-10-19T11:11:00Z"));
+    require(detect_anomalies(calm, "bay-A").empty(), "a session inside every fence yields nothing");
+}
+
+void test_fleet_drift() {
+    // Two healthy bays near 100 kWh, one bay whose recent mean fell to 50:
+    // 50 % off the fleet median 100, over the 35 % threshold.
+    std::map<std::string, std::vector<SessionRecord>> fleet;
+    for (std::uint64_t i = 1; i <= 5; ++i) {
+        fleet["bay-A"].push_back(make_session(i, 100, 60000, 250000, "2026-10-19T10:0" + std::to_string(i) + ":00Z"));
+        fleet["bay-B"].push_back(
+            make_session(i, 99 + (i % 3), 60000, 250000, "2026-10-19T10:1" + std::to_string(i) + ":00Z"));
+        fleet["bay-C"].push_back(make_session(i, 50, 60000, 250000, "2026-10-19T10:2" + std::to_string(i) + ":00Z"));
+    }
+    const auto drift = detect_fleet_drift(fleet);
+    require(drift.size() == 1, "exactly the underperforming bay drifts, got " + std::to_string(drift.size()));
+    require(drift.front().asset_id == "bay-C", "the drift names bay-C, got " + drift.front().asset_id);
+    require(drift.front().method == "fleet_median", "the drift detector is named");
+    require(std::abs(drift.front().expected_value - 0.1) < 1e-9, "the fleet median is the expectation");
+    require(drift.front().deviation_pct > 35.0, "the deviation exceeds the documented threshold");
+
+    // A fleet with no outlier: no drift.
+    fleet["bay-C"].clear();
+    for (std::uint64_t i = 1; i <= 5; ++i)
+        fleet["bay-C"].push_back(
+            make_session(i, 98 + (i % 3), 60000, 250000, "2026-10-19T10:2" + std::to_string(i) + ":00Z"));
+    require(detect_fleet_drift(fleet).empty(), "a homogeneous fleet yields no drift");
+
+    // Too few assets to compare: the detector stays silent, it is not a
+    // per-asset anomaly detector.
+    std::map<std::string, std::vector<SessionRecord>> two_bays;
+    two_bays["bay-A"] = fleet["bay-A"];
+    two_bays["bay-C"] = fleet["bay-C"];
+    require(detect_fleet_drift(two_bays).empty(), "below MIN_DRIFT_ASSETS there is no fleet to drift from");
+}
+
+void test_degradation_assessment() {
+    // A steadily decaying duty factor: 100 %, 96 %, 92 %, ... The OLS slope
+    // is exactly -4 %/session with R² = 1, and with 11 sessions the verdict
+    // is a maintenance flag.
+    std::vector<SessionRecord> decaying;
+    for (int i = 0; i < 11; ++i) {
+        auto s = make_session(static_cast<std::uint64_t>(i) + 1, 1000, 1000000, 250000,
+                              "2026-10-18T10:00:0" + std::to_string(i) + "Z");
+        s.charging_s = 1000 - 40 * i;  // duty %: 100, 96, ..., 60 (duration 1000 s)
+        decaying.push_back(s);
+    }
+    const auto d = assess_degradation(decaying, "bay-A");
+    require(d.sessions_used == 11, "all eleven sessions are used");
+    require(std::abs(d.slope_pct_per_session - (-4.0)) < 1e-9,
+            "the OLS slope is exact, got " + std::to_string(d.slope_pct_per_session));
+    require(d.r_squared > 0.999, "a perfect line fits perfectly, got " + std::to_string(d.r_squared));
+    require(d.degrading, "a steep, consistent decay is flagged for inspection");
+
+    // A flat noisy series: slope near zero, R² near zero, no flag.
+    std::vector<SessionRecord> flat;
+    for (int i = 0; i < 12; ++i) {
+        auto s = make_session(static_cast<std::uint64_t>(i) + 1, 1000, 1000000, 250000,
+                              "2026-10-18T12:00:0" + std::to_string(i) + "Z");
+        s.charging_s = (i % 2 == 0) ? 900 : 950;
+        flat.push_back(s);
+    }
+    const auto f = assess_degradation(flat, "bay-A");
+    require(!f.degrading, "alternating noise is not decay");
+
+    // Too little history: no verdict beyond insufficient.
+    std::vector<SessionRecord> one = decaying;
+    one.resize(1);
+    const auto o = assess_degradation(one, "bay-A");
+    require(!o.degrading && o.sessions_used == 1, "one session is not a trend");
+
+    const auto json = json_degradation(d);
+    require(json.find("\"slope_pct_per_session\":-4") != std::string::npos, "the JSON carries the exact slope");
+    require(json.find("\"degrading\":true") != std::string::npos, "the JSON carries the verdict");
+}
+
+void test_trend_json_has_duty() {
+    const auto trend = compute_session_trend(baseline_sessions(), "bay-A");
+    const auto json = json_session_trend(trend);
+    require(json.find("\"efficiency_pct\"") != std::string::npos,
+            "the duty factor series is serialized, not computed and dropped");
+    require(json.find("\"value\":100") != std::string::npos, "a full-duty session reads 100");
+}
+
 }  // namespace
 
 int main() {
@@ -427,6 +542,14 @@ int main() {
         std::cout << "session trend\n";
         test_detect_anomalies();
         std::cout << "anomaly detection\n";
+        test_iqr_fences();
+        std::cout << "iqr fences\n";
+        test_fleet_drift();
+        std::cout << "fleet drift\n";
+        test_degradation_assessment();
+        std::cout << "degradation assessment\n";
+        test_trend_json_has_duty();
+        std::cout << "trend json duty\n";
         test_fleet_summary();
         std::cout << "fleet summary\n";
         test_ocpi_cdr();

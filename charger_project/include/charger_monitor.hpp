@@ -10,6 +10,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -19,7 +20,7 @@
 
 namespace charger {
 
-constexpr const char* VERSION = "2.0.0";
+constexpr const char* VERSION = "2.1.0";
 constexpr const char* PROJECT_NAME = "charger_monitor";
 constexpr const char* SNAPSHOT_SCHEMA = "charger.snapshot.v1";
 constexpr const char* SESSION_SCHEMA = "charger.session.v1";
@@ -399,13 +400,39 @@ struct FleetSummary {
 
 struct AnomalyResult {
     std::string asset_id;
-    std::string anomaly_type;  // "energy_spike", "duration_outlier", "cost_anomaly", "pattern_break"
+    std::string anomaly_type;  // "energy_spike", "duration_outlier", "cost_anomaly", "pattern_break",
+                               // "fleet_drift"
     std::string severity;      // "low", "medium", "high", "critical"
     std::string timestamp_utc;
     double expected_value;
     double actual_value;
     double deviation_pct;
     std::string description;
+    // Which detector fired: "zscore" (leave-one-out z over the pre-session
+    // baseline, sensitive to the mean it uses), "iqr" (Tukey fences over the
+    // same baseline, robust to the tails that inflate a mean), or
+    // "fleet_median" (cross-bay drift). A reviewer sees which test produced
+    // the number, not just the number.
+    std::string method;
+};
+
+// Duty-factor degradation over an asset's closed billable sessions. The
+// duty factor (charging time / wall time, %) falls when a charger interrupts
+// itself more and more: derating on temperature, protection trips, connector
+// faults. The assessment is an ordinary least-squares slope of duty factor
+// against session order, with R² saying how much of the variation the trend
+// explains. degrading is true only when the slope is negative beyond
+// -0.5 %/session AND R² >= 0.5 AND at least 10 sessions were used: a noisy
+// flat series must not read as decay, and a steep drop explained by nothing
+// (low R²) is an event, not a trend.
+struct DegradationAssessment {
+    std::string asset_id;
+    double slope_pct_per_session{0.0};
+    double intercept_pct{0.0};
+    double r_squared{0.0};
+    std::size_t sessions_used{0};
+    bool degrading{false};
+    std::string verdict;  // human-readable summary for the report line
 };
 
 // Multi-Bay Monitor forward declaration
@@ -554,9 +581,28 @@ bool send_webhook(const std::string& url, const WebhookEvent& event, const std::
 SessionTrend compute_session_trend(const std::vector<SessionRecord>& sessions, const std::string& asset_id);
 FleetSummary compute_fleet_summary(const std::vector<Snapshot>& bay_snapshots);
 std::vector<AnomalyResult> detect_anomalies(const std::vector<SessionRecord>& sessions, const std::string& asset_id);
+
+// Cross-bay drift: per-asset closed-billable history in, anomalies out. For
+// every asset with at least MIN_DRIFT_SESSIONS closed billable sessions the
+// mean of its most recent DRIFT_RECENT_SESSIONS is compared against the
+// fleet median of those means. When at least MIN_DRIFT_ASSETS such assets
+// exist and an asset's mean deviates from the fleet median by more than
+// DRIFT_THRESHOLD, a "fleet_drift" anomaly is reported: one bay delivering
+// systematically less (or more) than its twins is a maintenance signal that
+// per-asset baselines cannot see, because each bay looks normal against
+// itself. Constants are declared so the gates are visible in the header and
+// stable in tests.
+inline constexpr std::size_t DRIFT_RECENT_SESSIONS = 5;
+inline constexpr std::size_t MIN_DRIFT_SESSIONS = 3;
+inline constexpr std::size_t MIN_DRIFT_ASSETS = 3;
+inline constexpr double DRIFT_THRESHOLD = 0.35;  // 35 % off the fleet median
+std::vector<AnomalyResult> detect_fleet_drift(const std::map<std::string, std::vector<SessionRecord>>& per_asset);
+
+DegradationAssessment assess_degradation(const std::vector<SessionRecord>& sessions, const std::string& asset_id);
 std::string json_fleet_summary(const FleetSummary& summary);
 std::string json_session_trend(const SessionTrend& trend);
 std::string json_anomalies(const std::vector<AnomalyResult>& anomalies);
+std::string json_degradation(const DegradationAssessment& assessment);
 
 // OCPI CDR Export
 struct OcpiCdrRecord {

@@ -5,6 +5,29 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] — 2026-10-19
+
+### Added
+
+- **Second anomaly detector: Tukey IQR fences.** A leave-one-out z-score is
+  blind when the history itself contains an outlier — the single extreme
+  inflates both the mean and the spread until the next extreme scores a
+  modest z. The IQR detector compares against quartile fences (R-7), which
+  barely move, and escalates to `critical` beyond the 3-IQR line. Both
+  detectors run on every query; each result names the method that fired.
+- **Cross-bay drift detection** (`--drift`): an asset whose recent mean
+  energy deviates more than 35 % from the fleet median of its peers is
+  reported with the deviation; requires at least three bays, so a two-bay
+  fleet stays silent rather than inventing a baseline.
+- **Duty-factor degradation assessment** (`--degradation`): OLS slope of the
+  per-session duty factor (charging time over session duration) with R²,
+  per asset or fleet-wide. A charger that interrupts itself more and more
+  gets flagged for inspection before it fails; a flat noisy series does
+  not. Planned in the roadmap, now shipped.
+- **Duty factor in the trend series** (`--trend`): each point carries the
+  session's charging-time share, the raw material of the degradation
+  assessment.
+
 ## [2.0.0] — 2026-10-19
 
 ### Changed
@@ -330,6 +353,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - Replay mode, libFuzzer harness, sanitizer builds, CMake presets.
 
+[2.1.0]: https://github.com/elmoutaouakiltarik-web/charger_monitor/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/elmoutaouakiltarik-web/charger_monitor/compare/v1.4.0...v2.0.0
 [1.4.0]: https://github.com/elmoutaouakiltarik-web/charger_monitor/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/elmoutaouakiltarik-web/charger_monitor/releases/tag/v1.3.0

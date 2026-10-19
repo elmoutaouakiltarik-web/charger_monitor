@@ -16,6 +16,8 @@
 #include <string>
 #include <unordered_map>
 
+#include <algorithm>
+
 #if defined(_WIN32)
 #include <windows.h>
 #include <winhttp.h>
@@ -1516,7 +1518,8 @@ std::vector<AnomalyResult> detect_anomalies(const std::vector<SessionRecord>& se
         return val != mean ? std::numeric_limits<double>::infinity() : 0.0;
     };
 
-    auto push = [&](const char* type, const char* severity, double expected, double actual, const char* label) {
+    auto push = [&](const char* type, const char* severity, double expected, double actual, const char* label,
+                    const char* method) {
         AnomalyResult a;
         a.asset_id = asset_id;
         a.anomaly_type = type;
@@ -1527,14 +1530,190 @@ std::vector<AnomalyResult> detect_anomalies(const std::vector<SessionRecord>& se
         a.deviation_pct = expected > 0.0 ? ((actual - expected) / expected) * 100.0 : 0.0;
         a.description = std::string(label) + " " + std::to_string(std::abs(a.deviation_pct)) + "% from the " +
                         std::to_string(hist) + "-session baseline";
+        a.method = method;
         anomalies.push_back(a);
     };
 
-    if (z_or_inf(e_std, e_val, e_mean) > 3.0) push("energy_spike", "high", e_mean, e_val, "Energy consumption");
-    if (z_or_inf(d_std, d_val, d_mean) > 3.0) push("duration_outlier", "medium", d_mean, d_val, "Session duration");
-    if (z_or_inf(c_std, c_val, c_mean) > 3.0) push("cost_anomaly", "high", c_mean, c_val, "Session cost");
+    // Detector 1: leave-one-out z-score. Sensitive to the mean: one extreme
+    // session in the baseline inflates both the mean and the spread it is
+    // judged against, which can hide the NEXT outlier.
+    const double e_z = z_or_inf(e_std, e_val, e_mean);
+    const double d_z = z_or_inf(d_std, d_val, d_mean);
+    const double c_z = z_or_inf(c_std, c_val, c_mean);
+    if (e_z > 3.0) push("energy_spike", "high", e_mean, e_val, "Energy consumption", "zscore");
+    if (d_z > 3.0) push("duration_outlier", "medium", d_mean, d_val, "Session duration", "zscore");
+    if (c_z > 3.0) push("cost_anomaly", "high", c_mean, c_val, "Session cost", "zscore");
+
+    // Detector 2: Tukey fences over the SAME baseline. The IQR is computed
+    // from quartiles (R-7 interpolation), so a single extreme session in the
+    // history moves the fence barely at all where it moves the z-score mean
+    // a lot. A series the z-score calls normal because its own outlier
+    // polluted the baseline is exactly the case the fence catches.
+    // An IQR of zero (a genuinely constant baseline) is a degenerate fence:
+    // every value would be outside it, so the detector stays silent and
+    // leaves that case to the z-score, which flags any deviation.
+    auto quantile_r7 = [](std::vector<double> v, double p) {
+        std::sort(v.begin(), v.end());
+        const double pos = (static_cast<double>(v.size()) - 1.0) * p;
+        const double lo = std::floor(pos);
+        const std::size_t i = static_cast<std::size_t>(lo);
+        const std::size_t j = std::min(i + 1, v.size() - 1);
+        return v[i] + (pos - lo) * (v[j] - v[i]);
+    };
+    auto outside_fence = [&](const std::vector<double>& v, double val) {
+        const double q1 = quantile_r7(v, 0.25);
+        const double q3 = quantile_r7(v, 0.75);
+        const double iqr = q3 - q1;
+        if (iqr <= 0.0) return false;  // degenerate fence: uninformative, z-score owns this case
+        return val < q1 - 1.5 * iqr || val > q3 + 1.5 * iqr;
+    };
+    auto beyond_extreme = [&](const std::vector<double>& v, double val) {
+        const double q1 = quantile_r7(v, 0.25);
+        const double q3 = quantile_r7(v, 0.75);
+        const double iqr = q3 - q1;
+        return val < q1 - 3.0 * iqr || val > q3 + 3.0 * iqr;
+    };
+    // The IQR detector's "expected" is the baseline MEDIAN, not the mean:
+    // robustness is the whole point of the second detector.
+    auto median_of = [](std::vector<double> v) {
+        std::sort(v.begin(), v.end());
+        const std::size_t n = v.size();
+        return n % 2 == 1 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2.0;
+    };
+    if (e_z <= 3.0 && outside_fence(energies, e_val))
+        push("energy_spike", beyond_extreme(energies, e_val) ? "critical" : "high", median_of(energies), e_val,
+             "Energy consumption", "iqr");
+    if (d_z <= 3.0 && outside_fence(durations, d_val))
+        push("duration_outlier", beyond_extreme(durations, d_val) ? "critical" : "medium", median_of(durations), d_val,
+             "Session duration", "iqr");
+    if (c_z <= 3.0 && outside_fence(costs, c_val))
+        push("cost_anomaly", beyond_extreme(costs, c_val) ? "critical" : "high", median_of(costs), c_val,
+             "Session cost", "iqr");
 
     return anomalies;
+}
+
+std::vector<AnomalyResult> detect_fleet_drift(const std::map<std::string, std::vector<SessionRecord>>& per_asset) {
+    std::vector<AnomalyResult> anomalies;
+
+    // Recent mean energy per asset, closed billable sessions only: an
+    // INTERRUPTED close is held for review and its numbers are not evidence.
+    struct AssetMean {
+        std::string asset_id;
+        double mean_kwh;
+        std::string last_ts;
+    };
+    std::vector<AssetMean> means;
+    for (const auto& [asset_id, sessions] : per_asset) {
+        std::vector<double> kwh;
+        std::string last_ts;
+        for (const auto& s : sessions) {
+            if (!s.closed || !s.billing_complete) continue;
+            kwh.push_back(static_cast<double>(s.energy_uwh) / 1e9);  // uWh -> kWh
+            last_ts = !s.ocpi_start_utc.empty() ? s.ocpi_start_utc : s.ocpi_stop_utc;
+        }
+        if (kwh.size() < MIN_DRIFT_SESSIONS) continue;
+        // The most recent DRIFT_RECENT_SESSIONS sessions, not the first ones:
+        // drift is about what the bay is doing NOW.
+        const std::size_t first = kwh.size() > DRIFT_RECENT_SESSIONS ? kwh.size() - DRIFT_RECENT_SESSIONS : 0;
+        double sum = 0.0;
+        for (std::size_t i = first; i < kwh.size(); ++i) sum += kwh[i];
+        means.push_back({asset_id, sum / static_cast<double>(kwh.size() - first), last_ts});
+    }
+
+    // Comparing against a fleet median needs a fleet: below MIN_DRIFT_ASSETS
+    // assets there is no "twin" to drift from, and per-asset baselines are
+    // what detect_anomalies is for.
+    if (means.size() < MIN_DRIFT_ASSETS) return anomalies;
+
+    std::vector<double> sorted;
+    sorted.reserve(means.size());
+    for (const auto& m : means) sorted.push_back(m.mean_kwh);
+    std::sort(sorted.begin(), sorted.end());
+    const std::size_t n = sorted.size();
+    const double median = n % 2 == 1 ? sorted[n / 2] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0;
+    if (median <= 0.0) return anomalies;
+
+    for (const auto& m : means) {
+        const double rel = std::abs(m.mean_kwh - median) / median;
+        if (rel <= DRIFT_THRESHOLD) continue;
+        AnomalyResult a;
+        a.asset_id = m.asset_id;
+        a.anomaly_type = "fleet_drift";
+        a.severity = rel > 2.0 * DRIFT_THRESHOLD ? "high" : "medium";
+        a.timestamp_utc = m.last_ts;
+        a.expected_value = median;
+        a.actual_value = m.mean_kwh;
+        a.deviation_pct = rel * 100.0;
+        a.method = "fleet_median";
+        a.description = "Mean of the last " + std::to_string(DRIFT_RECENT_SESSIONS) + " sessions differs " +
+                        std::to_string(rel * 100.0) + "% from the fleet median of " + std::to_string(n) + " bays";
+        anomalies.push_back(a);
+    }
+    return anomalies;
+}
+
+DegradationAssessment assess_degradation(const std::vector<SessionRecord>& sessions, const std::string& asset_id) {
+    constexpr double DEGRADE_SLOPE_LIMIT = -0.5;  // % duty factor per session
+    constexpr double DEGRADE_MIN_R2 = 0.5;
+    constexpr std::size_t DEGRADE_MIN_SESSIONS = 10;
+
+    DegradationAssessment a;
+    a.asset_id = asset_id;
+
+    // Duty factor of every closed billable session, in journal order (which
+    // is close order): the x axis is session sequence, because the question
+    // is "is this charger delivering less of each session over time?".
+    std::vector<double> duty;
+    for (const auto& s : sessions) {
+        if (!s.closed || !s.billing_complete) continue;
+        if (s.duration_ms <= 0) continue;
+        duty.push_back(static_cast<double>(s.charging_s) / (static_cast<double>(s.duration_ms) / 1000.0) * 100.0);
+    }
+    a.sessions_used = duty.size();
+    if (duty.size() < 2) {
+        a.verdict = "insufficient history (need at least 2 closed billable sessions)";
+        return a;
+    }
+
+    // Ordinary least squares y = intercept + slope * x over session index.
+    const double n = static_cast<double>(duty.size());
+    double sx = 0, sy = 0, sxx = 0, sxy = 0;
+    for (std::size_t i = 0; i < duty.size(); ++i) {
+        const double x = static_cast<double>(i);
+        sx += x;
+        sy += duty[i];
+        sxx += x * x;
+        sxy += x * duty[i];
+    }
+    const double denom = n * sxx - sx * sx;
+    if (denom == 0.0) {
+        a.verdict = "degenerate series";
+        return a;
+    }
+    a.slope_pct_per_session = (n * sxy - sx * sy) / denom;
+    a.intercept_pct = (sy - a.slope_pct_per_session * sx) / n;
+
+    const double mean = sy / n;
+    double ss_res = 0.0, ss_tot = 0.0;
+    for (std::size_t i = 0; i < duty.size(); ++i) {
+        const double fitted = a.intercept_pct + a.slope_pct_per_session * static_cast<double>(i);
+        ss_res += (duty[i] - fitted) * (duty[i] - fitted);
+        ss_tot += (duty[i] - mean) * (duty[i] - mean);
+    }
+    a.r_squared = ss_tot > 0.0 ? 1.0 - ss_res / ss_tot : 0.0;
+
+    a.degrading = a.slope_pct_per_session <= DEGRADE_SLOPE_LIMIT && a.r_squared >= DEGRADE_MIN_R2 &&
+                  a.sessions_used >= DEGRADE_MIN_SESSIONS;
+    if (a.degrading) {
+        a.verdict = "degrading: duty factor falls " + std::to_string(-a.slope_pct_per_session) + "%/session (R² " +
+                    std::to_string(a.r_squared) + ") — schedule inspection";
+    } else if (a.slope_pct_per_session < 0.0) {
+        a.verdict = "no significant degradation (trend not steep or not consistent enough)";
+    } else {
+        a.verdict = "no degradation trend";
+    }
+    return a;
 }
 
 FleetSummary compute_fleet_summary(const std::vector<Snapshot>& bay_snapshots) {
@@ -1684,6 +1863,12 @@ std::string json_session_trend(const charger::SessionTrend& trend) {
         o << "{\"timestamp\":\"" << json_escape(trend.avg_power_kw[i].timestamp_utc)
           << "\",\"value\":" << trend.avg_power_kw[i].value << "}";
     }
+    o << "],\"efficiency_pct\":[";
+    for (size_t i = 0; i < trend.efficiency_pct.size(); ++i) {
+        if (i) o << ",";
+        o << "{\"timestamp\":\"" << json_escape(trend.efficiency_pct[i].timestamp_utc)
+          << "\",\"value\":" << trend.efficiency_pct[i].value << "}";
+    }
     o << "],\"cost_eur\":[";
     for (size_t i = 0; i < trend.cost_eur.size(); ++i) {
         if (i) o << ",";
@@ -1711,6 +1896,19 @@ std::string json_anomalies(const std::vector<charger::AnomalyResult>& anomalies)
         o << "}";
     }
     o << "]}";
+    return o.str();
+}
+
+std::string json_degradation(const charger::DegradationAssessment& a) {
+    std::ostringstream o;
+    o << "{\"asset_id\":\"" << json_escape(a.asset_id) << "\"";
+    o << ",\"sessions_used\":" << a.sessions_used;
+    o << ",\"slope_pct_per_session\":" << a.slope_pct_per_session;
+    o << ",\"intercept_pct\":" << a.intercept_pct;
+    o << ",\"r_squared\":" << a.r_squared;
+    o << ",\"degrading\":" << (a.degrading ? "true" : "false");
+    o << ",\"verdict\":\"" << json_escape(a.verdict) << "\"";
+    o << "}";
     return o.str();
 }
 

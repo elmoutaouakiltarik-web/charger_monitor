@@ -12,6 +12,7 @@
 #include <csignal>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -123,6 +124,8 @@ struct Options {
     bool print_profile_example{false};
     bool trend{false};
     bool anomalies{false};
+    bool drift{false};
+    bool degradation{false};
     std::optional<std::string> stuck_at_s;
     std::optional<std::string> max_v_rate;
     std::optional<std::string> max_i_rate;
@@ -173,7 +176,12 @@ void usage(const char* argv0) {
         << "  --trend --journal PATH [--asset-id ID]   session trend series (energy, duration, power,\n"
         << "                             duty factor, cost) from a verified journal\n"
         << "  --anomalies --journal PATH [--asset-id ID]  statistical outliers over closed sessions\n"
-        << "                             (energy spike, duration outlier, cost anomaly, pattern break)\n"
+        << "                             (energy spike, duration outlier, cost anomaly, pattern break);\n"
+        << "                             each result names the detector that fired (zscore or iqr)\n"
+        << "  --drift --journal PATH    cross-bay drift: a bay whose recent mean energy deviates from the\n"
+        << "                             fleet median of its twins (needs at least 3 bays with 3 sessions)\n"
+        << "  --degradation --journal PATH [--asset-id ID]  duty-factor trend per asset (OLS slope, R²);\n"
+        << "                             flags a charger that interrupts itself more and more\n"
         << "\nSupervision files (read-only exports; the monitor opens no listening socket)\n"
         << "  --snapshot-file PATH   atomically rewrite PATH with the newest snapshot (same JSON line as stdout)\n"
         << "  --metrics-file PATH    atomically rewrite PATH with Prometheus text, e.g. for the node_exporter\n"
@@ -427,6 +435,10 @@ std::optional<Options> parse_args(int argc, char** argv, std::string& error) {
             opt.trend = true;
         } else if (a == "--anomalies") {
             opt.anomalies = true;
+        } else if (a == "--drift") {
+            opt.drift = true;
+        } else if (a == "--degradation") {
+            opt.degradation = true;
         } else if (a == "--print-config") {
             opt.print_config = true;
         } else if (a == "--stuck-at-s") {
@@ -475,7 +487,7 @@ std::optional<Options> parse_args(int argc, char** argv, std::string& error) {
     const bool is_action = !opt.portfolio_from.empty() || opt.verify_journal || opt.print_config || opt.dump_dbc ||
                            opt.anchor_journal || opt.verify_anchor || opt.print_tou || !opt.multibay_file.empty() ||
                            !opt.profile_file.empty() || opt.print_multibay_example || opt.print_profile_example ||
-                           opt.trend || opt.anomalies;
+                           opt.trend || opt.anomalies || opt.drift || opt.degradation;
     const bool exports = !opt.snapshot_file.empty() || !opt.metrics_file.empty();
     if (is_action && exports) {
         error = "--snapshot-file and --metrics-file belong to a listening mode, not to a standalone action";
@@ -1291,6 +1303,65 @@ static int run_sessions_action(const std::string& journal, const std::string& as
     return 0;
 }
 
+// Verified journal in, per-asset closed-billable history out. Shared by the
+// drift and degradation actions: both reason ACROSS assets, unlike the
+// per-asset trend/anomalies above.
+static int load_per_asset_history(const std::string& journal,
+                                  std::map<std::string, std::vector<charger::SessionRecord>>& per_asset) {
+    if (!std::filesystem::exists(journal)) {
+        std::cerr << "JOURNAL NOT FOUND: " << journal << '\n';
+        return 2;
+    }
+    std::string err;
+    auto led = charger::Ledger::open(journal, false, err);
+    if (!led) {
+        std::cerr << "FATAL: " << err << '\n';
+        return 1;
+    }
+    if (!led->verify(err)) {
+        std::cerr << "LEDGER TAMPERED: " << err << '\n';
+        return 3;
+    }
+    (void)led->recover();
+    for (const auto& s : led->sessions()) {
+        if (!s.record.closed || !s.record.billing_complete) continue;
+        per_asset[s.asset_id].push_back(s.record);
+    }
+    if (per_asset.empty()) {
+        std::cerr << "NO CLOSED BILLABLE SESSIONS in the journal\n";
+        return 4;
+    }
+    return 0;
+}
+
+static int run_drift_action(const std::string& journal) {
+    std::map<std::string, std::vector<charger::SessionRecord>> per_asset;
+    const int rc = load_per_asset_history(journal, per_asset);
+    if (rc != 0) return rc;
+    std::cout << charger::json_anomalies(charger::detect_fleet_drift(per_asset)) << '\n';
+    return 0;
+}
+
+static int run_degradation_action(const std::string& journal, const std::string& asset_id) {
+    std::map<std::string, std::vector<charger::SessionRecord>> per_asset;
+    const int rc = load_per_asset_history(journal, per_asset);
+    if (rc != 0) return rc;
+    if (!asset_id.empty() && per_asset.find(asset_id) == per_asset.end()) {
+        std::cerr << "NO CLOSED BILLABLE SESSIONS for asset " << asset_id << '\n';
+        return 4;
+    }
+    std::cout << "{\"assessments\":[";
+    bool first = true;
+    for (const auto& [aid, sessions] : per_asset) {
+        if (!asset_id.empty() && aid != asset_id) continue;
+        if (!first) std::cout << ",";
+        first = false;
+        std::cout << charger::json_degradation(charger::assess_degradation(sessions, aid));
+    }
+    std::cout << "]}\n";
+    return 0;
+}
+
 int main(int argc, char** argv) {
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
@@ -1336,6 +1407,14 @@ int main(int argc, char** argv) {
             return 2;
         }
         return run_sessions_action(parsed->journal, parsed->asset_id, parsed->trend);
+    }
+    if (parsed->drift || parsed->degradation) {
+        if (parsed->journal.empty()) {
+            std::cerr << "FATAL: --drift/--degradation require --journal PATH\n";
+            return 2;
+        }
+        if (parsed->drift) return run_drift_action(parsed->journal);
+        return run_degradation_action(parsed->journal, parsed->asset_id);
     }
     if (parsed->dump_dbc) {
         if (parsed->dbc_file.empty()) {
