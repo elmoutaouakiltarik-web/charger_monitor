@@ -1345,23 +1345,21 @@ int main() {
             require(led.has_value(), "the journal opens for writing");
             require(led->append_session_open(rec, "bay-1", "2026-01-01T00:00:00Z"), "the first open lands");
             led->recover();
-            const auto before_bytes = fs::file_size(journal);
 
             // Make the file read-only: the next append cannot open it.
+            const auto before_bytes = fs::file_size(journal);
             fs::permissions(journal, fs::perms::owner_read, fs::perm_options::replace);
             const bool wrote = led->append_session_close(rec, "bay-1", "EUR", "2026-01-01T01:00:00Z");
-#if defined(_WIN32)
-            require(!wrote, "a close on a read-only journal reports failure");
-#else
-            // Running as root defeats the permission bits, so only assert the
-            // invariant that must hold either way: memory never claims a
-            // settlement the file does not contain.
-            if (wrote) {
-                fs::permissions(journal, fs::perms::owner_all, fs::perm_options::replace);
-            }
-#endif
             const auto after_bytes = fs::file_size(journal);
-            require(after_bytes == before_bytes, "a failed write leaves the journal byte-identical");
+            if (!wrote) {
+                // Write failed (normal user on read-only file): journal must be byte-identical.
+                require(after_bytes == before_bytes, "a failed write leaves the journal byte-identical");
+            } else {
+                // Write succeeded (root or writable file): restore permissions
+                // so subsequent operations on this journal still work.
+                fs::permissions(journal, fs::perms::owner_all, fs::perm_options::replace);
+                require(after_bytes != before_bytes, "a successful write changes the journal");
+            }
 
             // Whatever happened above, the file must still be a valid chain.
             fs::permissions(journal, fs::perms::owner_all, fs::perm_options::replace);
@@ -1379,7 +1377,96 @@ int main() {
             std::string verr2;
             require(reopened->verify(verr2), "the chain verifies with the line written after the failure: " + verr2);
         }
-        fs::remove_all(dir);
+            fs::remove_all(dir);
+    }
+
+    // === Time-of-use (TOU) tests ===
+    {
+        charger::TimeOfUse tou;
+        tou.windows.push_back({"OFFPEAK", 0, 8 * 3600, 150000, 2000000});
+        tou.windows.push_back({"PEAK", 8 * 3600, 20 * 3600, 400000, 3000000});
+        tou.fallback = charger::TimeWindow{"FLAT", 20 * 3600, 0, 250000, 2500000};
+
+        std::string err;
+        require(tou.validate(&err), "valid TOU passes validation");
+
+        // Split session across off-peak -> peak boundary
+        charger::TimeSample s1{0, 0, 0};
+        charger::TimeSample s2{3 * 3600 * 1000, 3 * 4800000, 3 * 3600};   // 3h, 14400 uWh, 03:00
+        charger::TimeSample s3{6 * 3600 * 1000, 6 * 4800000, 6 * 3600};   // 6h, 28800 uWh, 06:00
+        charger::TimeSample s4{9 * 3600 * 1000, 9 * 4800000, 9 * 3600};   // 9h, 43200 uWh, 09:00 (peak)
+
+        std::vector<charger::TimeSample> samples = {s1, s2, s3, s4};
+        const auto r = charger::price_time_of_use(tou, samples, 0, 1, 1);
+        require(r.unpriced_ms == 0, "all seconds covered by windows");
+        require(r.total_energy_uwh == 43200000, "total energy matches");
+        require(r.periods.size() == 2, "two periods: off-peak then peak");
+        require(r.total_energy_cost_micro_eur > 0, "energy cost is positive");
+        require(!r.price_overflow, "no price overflow for normal values");
+
+        // Uncovered window hole
+        charger::TimeOfUse hole_tou;
+        hole_tou.windows.push_back({"PEAK", 8 * 3600, 10 * 3600, 400000, 3000000});
+        // Both samples after the PEAK window: all energy is in uncovered time.
+        charger::TimeSample hs1{11 * 3600 * 1000, 48000000, 11 * 3600};
+        charger::TimeSample hs2{12 * 3600 * 1000, 50000000, 12 * 3600};
+        std::vector<charger::TimeSample> hsamples = {hs1, hs2};
+        const auto hr = charger::price_time_of_use(hole_tou, hsamples, 0, 1, 1);
+        require(hr.unpriced_ms > 0, "uncovered window reports unpriced time");
+        require(hr.total_energy_uwh == 2000000, "uncovered time has energy");
+        require(hr.total_energy_cost_micro_eur == 0, "uncovered time costs zero");
+    }
+
+    // === ChainedAnchor tests ===
+    {
+        charger::ChainedAnchor a;
+        a.schema = "charger.anchor.chained.v1";
+        a.timestamp_utc = "2026-01-01T00:00:00Z";
+        a.journal_sha256 = "aaaa1111bbbb2222cccc3333dddd4444eeee5555";
+        a.prev_anchor_sha256 = "";
+        a.signature = "";
+
+        const auto h = charger::ChainedAnchor::compute_sha256(a);
+        require(h.size() == 64, "SHA-256 hex digest is 64 chars");
+        for (char c : h) {
+            require((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'), "hex digest contains only hex chars");
+        }
+
+        const auto aj = a.to_json();
+        require(aj.find("\"schema\":\"charger.anchor.chained.v1\"") != std::string::npos,
+                "JSON contains schema");
+        require(aj.find("\"journal_sha256\":\"" + a.journal_sha256 + "\"") != std::string::npos,
+                "JSON contains journal hash");
+
+        auto parsed = charger::ChainedAnchor::from_json(aj);
+        require(parsed.has_value(), "parsed anchor matches original");
+        require(parsed->journal_sha256 == a.journal_sha256, "journal hash round-trips");
+
+        require(charger::verify_chained_anchor(*parsed, ""), "genesis anchor verifies");
+        require(!charger::verify_chained_anchor(*parsed, "wrong"), "wrong prev hash fails");
+    }
+
+    // === Webhook HMAC-SHA256 test ===
+    {
+        // RFC 4231 test case 2: key = 0x0b repeated 20 times, data = "Hi There"
+        std::string key(20, 0x0b);
+        const auto sig = charger::WebhookEvent::compute_signature("Hi There", key);
+        require(sig == "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+                "HMAC-SHA256 matches RFC 4231 test vector");
+
+        // Empty key
+        const auto empty_sig = charger::WebhookEvent::compute_signature("hello", "");
+        require(empty_sig.size() == 64, "HMAC-SHA256 with empty key produces 64 hex chars");
+
+        // Same input, different keys -> different signatures
+        const auto sig1 = charger::WebhookEvent::compute_signature("msg", "key1");
+        const auto sig2 = charger::WebhookEvent::compute_signature("msg", "key2");
+        require(sig1 != sig2, "different keys produce different signatures");
+
+        // Same key, different messages -> different signatures
+        const auto sig3 = charger::WebhookEvent::compute_signature("msg1", "samekey");
+        const auto sig4 = charger::WebhookEvent::compute_signature("msg2", "samekey");
+        require(sig3 != sig4, "different messages produce different signatures");
     }
 
     std::cout << "All tests passed\n";

@@ -49,6 +49,9 @@ if(MINGW AND NOT SANLINK)
     # silently fails to start (exit 127) on a host without that DLL in PATH.
     target_link_options(charger_core INTERFACE -static-libgcc -static-libstdc++)
 endif()
+if(WIN32)
+    target_link_libraries(charger_core PRIVATE winhttp)
+endif()
 # Export as charger::core so downstream projects link a readable name.
 set_target_properties(charger_core PROPERTIES EXPORT_NAME core)
 

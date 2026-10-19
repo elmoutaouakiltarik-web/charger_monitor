@@ -38,6 +38,9 @@ constexpr const char* LEDGER_GENESIS_HASH = "00000000000000000000000000000000000
 // by an auditor with any standard tool, not only inside this binary.
 std::string sha256_hex(const std::string& data);
 
+// Raw SHA-256 (32 bytes). Used internally for HMAC-SHA256 webhook signatures.
+std::string sha256_raw(const std::string& data);
+
 struct RecoveryReport {
     std::uint64_t lines{0};
     std::uint64_t session_opens{0};

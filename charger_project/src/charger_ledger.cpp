@@ -209,6 +209,34 @@ std::string sha256_hex(const std::string& data) {
     return out;
 }
 
+std::string sha256_raw(const std::string& data) {
+    std::uint32_t state[8] = {0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+                              0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u};
+    const auto* bytes = reinterpret_cast<const unsigned char*>(data.data());
+    std::size_t full = data.size() / 64;
+    for (std::size_t i = 0; i < full; ++i) sha256_block(state, bytes + i * 64);
+
+    unsigned char tail[128] = {0};
+    const std::size_t rest = data.size() % 64;
+    if (rest != 0) std::memcpy(tail, bytes + full * 64, rest);
+    tail[rest] = 0x80;
+    const std::size_t tail_len = (rest < 56) ? 64 : 128;
+    const std::uint64_t bitlen = static_cast<std::uint64_t>(data.size()) * 8;
+    for (int i = 0; i < 8; ++i)
+        tail[tail_len - 1 - static_cast<std::size_t>(i)] = static_cast<unsigned char>(bitlen >> (8 * i));
+    for (std::size_t off = 0; off < tail_len; off += 64) sha256_block(state, tail + off);
+
+    std::string out;
+    out.reserve(32);
+    for (std::uint32_t v : state) {
+        out.push_back(static_cast<unsigned char>((v >> 24) & 0xff));
+        out.push_back(static_cast<unsigned char>((v >> 16) & 0xff));
+        out.push_back(static_cast<unsigned char>((v >> 8) & 0xff));
+        out.push_back(static_cast<unsigned char>(v & 0xff));
+    }
+    return out;
+}
+
 Ledger::Ledger(Ledger&& other) noexcept
     : path_(std::move(other.path_)),
       last_hash_(std::move(other.last_hash_)),

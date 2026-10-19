@@ -174,6 +174,22 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Dispute provenance for a session id reused after a restart pointed at the
   first run's opening line. The open-line entry is now replaced on open and
   erased on close.
+- **Chained journal anchor** (`charger.anchor.v1`): `write_journal_anchor()` pins
+  the journal prefix (whole-file digest, last hash, line count, UTC time) into a
+  separate append-only file; `verify_journal_anchor()` proves the prefix was not
+  rewritten while reporting lines appended since the anchor. CLI:
+  `charger_monitor --anchor-journal` / `--verify-anchor` (exit 3 on mismatch).
+- **Webhook streaming**: `charger_monitor --webhook-url http://host:port/path`
+  posts session open/close and billing events as HMAC-signed JSON to a listener.
+  No TLS in this build (use a local reverse proxy for HTTPS).
+- **Multi-bay monitor** (`charger_monitor.hpp`): `MultiBayMonitor` manages
+  multiple independent `Monitor` instances from one process, with per-bay config,
+  hot-reload, fleet rollup, anomaly detection and per-bay billing.
+- **Time-of-use tariff** (`charger_tou.hpp`): `price_time_of_use()` splits
+  sessions across tariff windows with an exact integer remainder, so no
+  microwatt-hour is lost at a window boundary. `price_time_of_use_strict()`
+  refuses to price a tariff with uncovered seconds. CLI:
+  `charger_settle --tou-settle FILE` adds a labelled `tou_estimate_eur` column.
 
 ### Documentation
 

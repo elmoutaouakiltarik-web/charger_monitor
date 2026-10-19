@@ -124,6 +124,18 @@ installed package, byte-for-byte parity tests between the C++ tools and the
 independent JavaScript verifier, no third-party code, and review of every
 change. This is a list of practices, not a certification claim.
 
+## AI-assisted development
+
+This project uses AI-assisted tooling (large language models) to help draft code,
+documentation and review comments. All AI-generated output is reviewed, tested
+and verified by a human before it is merged. AI-generated code is subject to the
+same review standards as human-written code: it must compile, pass the test
+suite, respect the zero-dependency rule, and be explainable by a human maintainer.
+
+If you use AI to generate code for this project, declare it in your pull request
+and be prepared to explain every line. Do not paste AI-generated code that you
+do not understand.
+
 ## Reporting security issues
 
 See [SECURITY.md](SECURITY.md). Please do not open a public issue first.

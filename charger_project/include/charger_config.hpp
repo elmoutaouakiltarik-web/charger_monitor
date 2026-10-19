@@ -11,17 +11,24 @@
 // rather than silently ignoring a typo in a tariff. A config that parses is a
 // config that means what it says.
 
+#include <chrono>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
-#include <chrono>
+
+// Forward declarations for types defined in charger_monitor.hpp
+namespace charger {
+struct Config;
+struct MultiBayConfig;
+struct PowerModuleProfile;
+}  // namespace charger
 
 #include "charger_monitor.hpp"
 
 namespace charger {
 
 constexpr const char* CONFIG_SCHEMA = "charger.config.v1";
-constexpr const char* MULTIBAY_CONFIG_SCHEMA = "charger.multibay.config.v1";
 
 struct ConfigError {
     std::string field;
@@ -44,19 +51,19 @@ struct ConfigLoadResult {
 // the config must exist in the DBC, otherwise the config is rejected.
 ConfigLoadResult parse_config(const std::string& text, const std::string& dbc_text = std::string());
 
-// === NEW: Multi-Bay Configuration parsing ===
+// Multi-Bay Configuration parsing
 struct MultiBayConfigLoadResult {
     bool ok{false};
-    MultiBayConfig config{};
+    std::unique_ptr<MultiBayConfig> config;
     std::vector<ConfigError> errors;
 };
 MultiBayConfigLoadResult parse_multibay_config(const std::string& text);
 std::string json_multibay_config_example();
 
-// === NEW: Power Module Profile management ===
+// Power Module Profile management
 struct PowerModuleProfileLoadResult {
     bool ok{false};
-    PowerModuleProfile profile{};
+    std::unique_ptr<PowerModuleProfile> profile;
     std::vector<ConfigError> errors;
 };
 PowerModuleProfileLoadResult parse_power_module_profile(const std::string& json_text);

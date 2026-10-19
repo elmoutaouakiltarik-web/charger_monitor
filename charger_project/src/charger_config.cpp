@@ -113,6 +113,13 @@ struct Parser {
         if (i == start) return std::nullopt;
         return s.substr(start, i - start);
     }
+
+    std::optional<bool> parse_bool() {
+        skip_ws();
+        if (word("true")) return true;
+        if (word("false")) return false;
+        return std::nullopt;
+    }
     std::optional<std::int64_t> parse_int() {
         const auto n = parse_number();
         if (!n) return std::nullopt;
@@ -628,15 +635,195 @@ std::string json_config_example() {
     return o.str();
 }
 
-}  // namespace charger
-// === NEW: Multi-Bay Configuration parsing ===
+// Multi-Bay Configuration parsing. Same contract as parse_config: strict,
+// located errors, no silent defaults for a typo. Each bay embeds a full
+// single-bay config document and is validated with the same rules, including
+// the Monitor invariant check.
+namespace {
+
+void parse_one_bay(const std::string& raw, std::size_t index, MultiBayConfigLoadResult& res) {
+    const std::string prefix = "bays[" + std::to_string(index) + "]";
+    Parser p{raw, 0, &res.errors};
+    if (!p.lit('{')) {
+        res.errors.push_back({prefix, "expected a JSON object for each bay"});
+        return;
+    }
+    BayConfig bay{};
+    bool saw_config = false;
+    while (!p.lit('}')) {
+        if (p.eof()) {
+            res.errors.push_back({prefix, "unterminated bay object: the closing brace is missing"});
+            return;
+        }
+        const auto key = take_key(p);
+        if (!key) {
+            res.errors.push_back({prefix, "invalid key"});
+            return;
+        }
+        p.skip_ws();
+        if (*key == "enabled") {
+            const auto v = p.parse_bool();
+            if (!v) {
+                res.errors.push_back({prefix + ".enabled", "expected true or false"});
+            } else {
+                bay.enabled = *v;
+            }
+        } else if (*key == "priority") {
+            const auto v = p.parse_int();
+            if (!v || *v < 0) {
+                res.errors.push_back({prefix + ".priority", "must be an integer >= 0"});
+            } else {
+                bay.priority = static_cast<int>(*v);
+            }
+        } else if (*key == "config") {
+            std::size_t vs = p.i;
+            const std::string raw_cfg = skip_value(raw, vs);
+            const auto sub = parse_config(raw_cfg);
+            for (const auto& e : sub.errors) {
+                res.errors.push_back({prefix + ".config." + e.field, e.message});
+            }
+            if (sub.ok) {
+                bay.config = sub.config;
+                saw_config = true;
+            }
+            p.i = vs;
+        } else {
+            res.errors.push_back({prefix + "." + *key, "unknown bay field (allowed: enabled, priority, config)"});
+            skip_value(raw, p.i);
+        }
+        p.lit(',');
+    }
+    if (!saw_config) {
+        res.errors.push_back({prefix, "each bay requires a config object"});
+        return;
+    }
+    res.config->bays.push_back(bay);
+}
+
+}  // namespace
+
 MultiBayConfigLoadResult parse_multibay_config(const std::string& text) {
     MultiBayConfigLoadResult res;
-    if (text.find(MULTIBAY_CONFIG_SCHEMA) == std::string::npos) {
-        res.errors.push_back({"$", "missing or invalid schema"});
+    res.config = std::make_unique<MultiBayConfig>();
+    Parser p{text, 0, &res.errors};
+    if (!p.lit('{')) {
+        res.errors.push_back({"$", "expected a JSON object at the root"});
         return res;
     }
-    res.ok = true;
+    bool saw_schema = false;
+    while (!p.lit('}')) {
+        if (p.eof()) {
+            res.errors.push_back({"$", "unterminated object: the closing brace is missing"});
+            return res;
+        }
+        const auto key = take_key(p);
+        if (!key) {
+            res.errors.push_back({"$", "invalid key"});
+            return res;
+        }
+        p.skip_ws();
+        if (*key == "schema") {
+            const auto v = p.parse_string();
+            if (!v) {
+                res.errors.push_back({"schema", "expected a string value"});
+            } else {
+                saw_schema = true;
+                if (*v != MULTIBAY_CONFIG_SCHEMA) {
+                    res.errors.push_back(
+                        {"schema", "expected version " + std::string(MULTIBAY_CONFIG_SCHEMA)});
+                }
+            }
+        } else if (*key == "global_report_interval_ms") {
+            const auto v = p.parse_int();
+            if (!v || *v <= 0) {
+                res.errors.push_back({"global_report_interval_ms", "must be an integer > 0"});
+            } else {
+                res.config->global_report_interval = std::chrono::milliseconds(*v);
+            }
+        } else if (*key == "enable_cross_bay_analytics") {
+            const auto v = p.parse_bool();
+            if (!v) {
+                res.errors.push_back({"enable_cross_bay_analytics", "expected true or false"});
+            } else {
+                res.config->enable_cross_bay_analytics = *v;
+            }
+        } else if (*key == "webhook_url") {
+            const auto v = p.parse_string();
+            if (!v) {
+                res.errors.push_back({"webhook_url", "expected a string value"});
+            } else {
+                // The built-in sender speaks plain http only (see send_webhook).
+                // A https endpoint needs an external reverse proxy; rejecting it
+                // here avoids a config that loads but silently never delivers.
+                if (!v->empty() && v->rfind("http://", 0) != 0) {
+                    res.errors.push_back(
+                        {"webhook_url", "must be an http:// URL: the built-in sender does not do TLS"});
+                }
+                res.config->webhook_url = *v;
+            }
+        } else if (*key == "webhook_secret") {
+            const auto v = p.parse_string();
+            if (!v) {
+                res.errors.push_back({"webhook_secret", "expected a string value"});
+            } else {
+                res.config->webhook_secret = *v;
+            }
+        } else if (*key == "ocpi_operator_id" || *key == "ocpi_country_code" || *key == "ocpi_party_id") {
+            const auto v = p.parse_string();
+            if (!v) {
+                res.errors.push_back({*key, "expected a string value"});
+            } else if (*key == "ocpi_operator_id") {
+                res.config->ocpi_operator_id = *v;
+            } else if (*key == "ocpi_country_code") {
+                // OCPI 2.1.1: country code is two uppercase ISO-3166 letters.
+                if (v->size() != 2 || !std::isalpha(static_cast<unsigned char>((*v)[0])) ||
+                    !std::isalpha(static_cast<unsigned char>((*v)[1])) ||
+                    !std::isupper(static_cast<unsigned char>((*v)[0])) ||
+                    !std::isupper(static_cast<unsigned char>((*v)[1]))) {
+                    res.errors.push_back({"ocpi_country_code", "must be a two-letter uppercase ISO-3166 code"});
+                }
+                res.config->ocpi_country_code = *v;
+            } else {
+                res.config->ocpi_party_id = *v;
+            }
+        } else if (*key == "bays") {
+            if (!p.lit('[')) {
+                res.errors.push_back({"bays", "expected a JSON array"});
+                skip_value(text, p.i);
+            } else {
+                std::size_t index = 0;
+                while (!p.lit(']')) {
+                    if (p.eof()) {
+                        res.errors.push_back({"bays", "unterminated array: the closing bracket is missing"});
+                        return res;
+                    }
+                    std::size_t vs = p.i;
+                    const std::string raw = skip_value(text, vs);
+                    if (raw.empty()) {
+                        res.errors.push_back({"bays[" + std::to_string(index) + "]", "invalid array element"});
+                        break;
+                    }
+                    parse_one_bay(raw, index, res);
+                    p.i = vs;
+                    ++index;
+                    p.lit(',');
+                }
+            }
+        } else {
+            res.errors.push_back({*key, "unknown multi-bay configuration field"});
+            skip_value(text, p.i);
+        }
+        p.lit(',');
+    }
+    if (!saw_schema) {
+        res.errors.push_back(
+            {"schema", "missing: the schema field is required and must be " + std::string(MULTIBAY_CONFIG_SCHEMA)});
+    }
+    if (res.config->bays.empty()) {
+        res.errors.push_back({"bays", "at least one bay is required"});
+    }
+    res.ok = res.errors.empty();
+    if (!res.ok) res.config = nullptr;
     return res;
 }
 
@@ -645,7 +832,7 @@ std::string json_multibay_config_example() {
     o << "{\n  \"schema\": \"" << MULTIBAY_CONFIG_SCHEMA << "\",\n"
       << "  \"global_report_interval_ms\": 5000,\n"
       << "  \"enable_cross_bay_analytics\": true,\n"
-      << "  \"webhook_url\": \"https://example.com/webhook\",\n"
+      << "  \"webhook_url\": \"http://example.com/webhook\",\n"
       << "  \"webhook_secret\": \"secret-key\",\n"
       << "  \"ocpi_operator_id\": \"OP123\",\n"
       << "  \"ocpi_country_code\": \"DE\",\n"
@@ -660,64 +847,151 @@ std::string json_multibay_config_example() {
     return o.str();
 }
 
-// === NEW: Power Module Profile management ===
+// Power Module Profile parsing. A profile is operator-supplied: the signal
+// names and thresholds describe THIS installation, taken from the vendor's
+// own DBC and service documentation. The library ships no built-in profiles —
+// a signal name that quietly does not match the real bus is worse than an
+// absent one. When a DBC is embedded in the profile, every mapped signal must
+// exist in it, so a typo fails at load time instead of silently reporting zero.
 PowerModuleProfileLoadResult parse_power_module_profile(const std::string& json_text) {
     PowerModuleProfileLoadResult res;
-    if (json_text.find("name") == std::string::npos) {
-        res.errors.push_back({"$", "missing profile name"});
+    res.profile = std::make_unique<PowerModuleProfile>();
+    Parser p{json_text, 0, &res.errors};
+    if (!p.lit('{')) {
+        res.errors.push_back({"$", "expected a JSON object at the root"});
         return res;
     }
-    res.ok = true;
+    bool saw_name = false;
+    while (!p.lit('}')) {
+        if (p.eof()) {
+            res.errors.push_back({"$", "unterminated object: the closing brace is missing"});
+            return res;
+        }
+        const auto key = take_key(p);
+        if (!key) {
+            res.errors.push_back({"$", "invalid key"});
+            return res;
+        }
+        p.skip_ws();
+        if (*key == "name") {
+            const auto v = p.parse_string();
+            if (!v || v->empty()) {
+                res.errors.push_back({"name", "must be a non-empty string"});
+            } else {
+                res.profile->name = *v;
+                saw_name = true;
+            }
+        } else if (*key == "vendor" || *key == "model") {
+            const auto v = p.parse_string();
+            if (!v) {
+                res.errors.push_back({*key, "expected a string value"});
+            } else if (*key == "vendor") {
+                res.profile->vendor = *v;
+            } else {
+                res.profile->model = *v;
+            }
+        } else if (*key == "dbc_text") {
+            const auto v = p.parse_string();
+            if (!v) {
+                res.errors.push_back({"dbc_text", "expected a string value"});
+            } else {
+                res.profile->dbc_text = *v;
+            }
+        } else if (*key == "temp_signal" || *key == "fan_speed_signal" || *key == "dc_link_voltage_signal" ||
+                   *key == "interlock_signal" || *key == "fault_code_signal") {
+            const auto v = p.parse_string();
+            if (!v) {
+                res.errors.push_back({*key, "expected a string value"});
+            } else if (*key == "temp_signal") {
+                res.profile->temp_signal = *v;
+            } else if (*key == "fan_speed_signal") {
+                res.profile->fan_speed_signal = *v;
+            } else if (*key == "dc_link_voltage_signal") {
+                res.profile->dc_link_voltage_signal = *v;
+            } else if (*key == "interlock_signal") {
+                res.profile->interlock_signal = *v;
+            } else {
+                res.profile->fault_code_signal = *v;
+            }
+        } else if (*key == "max_temp_c") {
+            const auto v = p.parse_int();
+            if (!v || *v < -60 || *v > 220) {
+                res.errors.push_back({"max_temp_c", "must be an integer between -60 and 220 (Celsius)"});
+            } else {
+                res.profile->max_temp_c = static_cast<std::int32_t>(*v);
+            }
+        } else if (*key == "min_fan_rpm") {
+            const auto v = p.parse_int();
+            if (!v || *v < 0) {
+                res.errors.push_back({"min_fan_rpm", "must be an integer >= 0"});
+            } else {
+                res.profile->min_fan_rpm = static_cast<std::int32_t>(*v);
+            }
+        } else if (*key == "min_dc_link_v") {
+            const auto v = p.parse_int();
+            if (!v || *v < 0) {
+                res.errors.push_back({"min_dc_link_v", "must be an integer >= 0"});
+            } else {
+                res.profile->min_dc_link_v = static_cast<std::int32_t>(*v);
+            }
+        } else if (*key == "max_dc_link_v") {
+            const auto v = p.parse_int();
+            if (!v || *v <= 0) {
+                res.errors.push_back({"max_dc_link_v", "must be an integer > 0"});
+            } else {
+                res.profile->max_dc_link_v = static_cast<std::int32_t>(*v);
+            }
+        } else {
+            res.errors.push_back({*key, "unknown power module profile field"});
+            skip_value(json_text, p.i);
+        }
+        p.lit(',');
+    }
+    if (!saw_name) {
+        res.errors.push_back({"name", "missing: every profile needs a name"});
+    }
+    if (res.profile->max_dc_link_v <= res.profile->min_dc_link_v) {
+        res.errors.push_back({"max_dc_link_v", "must be greater than min_dc_link_v"});
+    }
+    // DBC binding: a mapped signal that is absent from the embedded DBC is a
+    // config error, not a runtime surprise. Without an embedded DBC the names
+    // cannot be checked here and stay the operator's responsibility.
+    if (res.errors.empty() && !res.profile->dbc_text.empty()) {
+        const auto db = parse_dbc(res.profile->dbc_text);
+        if (!db.ok) {
+            std::string detail = "failed to parse the embedded DBC";
+            if (!db.errors.empty()) detail += " at line " + std::to_string(db.errors.front().first);
+            res.errors.push_back({"dbc_text", detail});
+        } else {
+            struct MappedSignal {
+                const char* field;
+                const std::string& signal;
+            };
+            const MappedSignal mapped[] = {
+                {"temp_signal", res.profile->temp_signal},
+                {"fan_speed_signal", res.profile->fan_speed_signal},
+                {"dc_link_voltage_signal", res.profile->dc_link_voltage_signal},
+                {"interlock_signal", res.profile->interlock_signal},
+                {"fault_code_signal", res.profile->fault_code_signal},
+            };
+            for (const auto& m : mapped) {
+                if (m.signal.empty()) continue;
+                bool found = false;
+                for (const auto& msg : db.database.messages) {
+                    if (msg.find_signal(m.signal) != nullptr) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    res.errors.push_back(
+                        {m.field, "signal '" + m.signal + "' is not present in the embedded DBC"});
+                }
+            }
+        }
+    }
+    res.ok = res.errors.empty();
+    if (!res.ok) res.profile = nullptr;
     return res;
 }
-
-std::vector<PowerModuleProfile> list_builtin_power_module_profiles() {
-    std::vector<PowerModuleProfile> profiles;
-    
-    PowerModuleProfile abb;
-    abb.name = "abb_terra";
-    abb.vendor = "ABB";
-    abb.model = "Terra 54/124/184";
-    abb.temp_signal = "PowerModule_Temp";
-    abb.fan_speed_signal = "PowerModule_FanSpeed";
-    abb.dc_link_voltage_signal = "PowerModule_DCLinkVoltage";
-    abb.interlock_signal = "PowerModule_Interlock";
-    abb.fault_code_signal = "PowerModule_FaultCode";
-    abb.max_temp_c = 85;
-    abb.min_fan_rpm = 1500;
-    abb.min_dc_link_v = 200;
-    abb.max_dc_link_v = 850;
-    profiles.push_back(abb);
-    
-    PowerModuleProfile delta;
-    delta.name = "delta_dc_wallbox";
-    delta.vendor = "Delta Electronics";
-    delta.model = "DC Wallbox 50kW";
-    delta.temp_signal = "Module_Temperature";
-    delta.fan_speed_signal = "Fan_RPM";
-    delta.dc_link_voltage_signal = "DC_Link_Voltage";
-    delta.interlock_signal = "Safety_Interlock";
-    delta.fault_code_signal = "Error_Code";
-    delta.max_temp_c = 80;
-    delta.min_fan_rpm = 1200;
-    delta.min_dc_link_v = 300;
-    delta.max_dc_link_v = 900;
-    profiles.push_back(delta);
-    
-    PowerModuleProfile siemens;
-    siemens.name = "siemens_sicharge_uc";
-    siemens.vendor = "Siemens";
-    siemens.model = "SICHARGE UC 100/200/300/400";
-    siemens.temp_signal = "PowerStack_Temp";
-    siemens.fan_speed_signal = "Cooling_Fan_RPM";
-    siemens.dc_link_voltage_signal = "DC_Link_Voltage";
-    siemens.interlock_signal = "Interlock_Status";
-    siemens.fault_code_signal = "Fault_Code";
-    siemens.max_temp_c = 90;
-    siemens.min_fan_rpm = 1000;
-    siemens.min_dc_link_v = 250;
-    siemens.max_dc_link_v = 920;
-    profiles.push_back(siemens);
-    
-    return profiles;
-}
+}  // namespace charger
