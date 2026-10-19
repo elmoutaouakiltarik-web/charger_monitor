@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "charger_ocpp.hpp"
 #include "charger_portfolio.hpp"
 
 #if defined(_WIN32)
@@ -358,6 +359,18 @@ bool Ledger::append(const std::string& type, const std::string& asset, const Ses
          << rec.samples << kTab << rec.integration_gaps << kTab << (rec.time_upper_bound ? 1 : 0) << kTab
          << (rec.energy_lower_bound ? 1 : 0) << kTab << rec.quality << kTab << context_currency_ << kTab
          << context_timestamp_ << kTab << context_tariff_ << kTab << json_payload;
+    if (type == "session_close") {
+        // v2.0 close lines append the electrical envelope and OCPI meter
+        // stamps after the payload. Open lines keep the v1.3 shape: an old
+        // reader needs no knowledge of columns it never sees, and a new one
+        // treats their absence as zero, the safe settlement default. The line
+        // type decides, not the record flag: callers may legitimately reuse a
+        // closed record to open a new session id.
+        rest << kTab << rec.peak_power_mw << kTab << rec.min_voltage_mv << kTab << rec.max_current_ma << kTab
+             << rec.ocpi_meter_start_wh << kTab << rec.ocpi_meter_stop_wh << kTab
+             << (rec.ocpi_start_utc.empty() ? std::string("-") : rec.ocpi_start_utc) << kTab
+             << (rec.ocpi_stop_utc.empty() ? std::string("-") : rec.ocpi_stop_utc);
+    }
     context_currency_.clear();
     context_timestamp_.clear();
     // The tariff of record belongs to the line being closed only. Leaving it
@@ -542,6 +555,23 @@ RecoveryReport Ledger::recover() {
         std::string tariff_json;
         if (parts.size() > 26) {
             tariff_json = parts[25];
+        }
+        if (rec.closed) {
+            // v2.0 close lines carry the electrical envelope and OCPI meter
+            // stamps as trailing columns (27+). Journals written before v2.0
+            // leave them absent, which parses to zero; the settlement paths
+            // already treat a zero envelope as "unknown", not as a claim.
+            rec.peak_power_mw = static_cast<std::int64_t>(num(27));
+            rec.min_voltage_mv = static_cast<std::int64_t>(num(28));
+            rec.max_current_ma = static_cast<std::int64_t>(num(29));
+            rec.ocpi_meter_start_wh = num(30);
+            rec.ocpi_meter_stop_wh = num(31);
+            const auto str_at = [&parts](std::size_t idx) -> std::string {
+                if (idx >= parts.size()) return {};
+                return parts[idx] == "-" ? std::string() : parts[idx];
+            };
+            rec.ocpi_start_utc = str_at(32);
+            rec.ocpi_stop_utc = str_at(33);
         }
 
         track(asset, rec, type);
@@ -902,9 +932,23 @@ std::string json_cdr(const SettledSession& s) {
     o << ",\"session_id\":\"" << json_escape(s.asset_id) << "-" << s.id << "\"";
     o << ",\"asset_id\":\"" << json_escape(s.asset_id) << "\"";
     o << ",\"currency\":\"" << json_escape(s.currency) << "\"";
-    // The journal stores a wall-clock label only for the close; the start is
-    // close minus the measured duration, so it is derived, not measured.
-    o << ",\"derived_start_utc\":\"close-minus-duration\"";
+    // Start time: when the session was recorded by a v2.0-or-later writer the
+    // open stamp is journaled (ocpi_start_utc) and measured; otherwise it is
+    // derived, close minus the measured duration, and labelled as such so a
+    // dispute reviewer can tell the two apart.
+    if (!r.ocpi_start_utc.empty()) {
+        o << ",\"start_utc\":\"" << json_escape(r.ocpi_start_utc) << "\"";
+        o << ",\"start_source\":\"journal\"";
+    } else {
+        const auto derived = derive_start_utc(s.closed_at_utc, r.duration_ms);
+        o << ",\"start_utc\":";
+        if (derived)
+            o << "\"" << json_escape(*derived) << "\"";
+        else
+            o << "null";
+        o << ",\"start_source\":\"close-minus-duration\"";
+    }
+    if (!r.ocpi_stop_utc.empty()) o << ",\"stop_source\":\"journal\"";
     o << ",\"end_utc\":\"" << json_escape(s.closed_at_utc) << "\"";
     o << ",\"duration_ms\":" << r.duration_ms;
     o << ",\"charging_s\":" << r.charging_s;

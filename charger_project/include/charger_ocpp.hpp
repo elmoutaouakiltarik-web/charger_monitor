@@ -81,10 +81,10 @@ std::optional<std::string> format_utc_epoch(std::int64_t epoch_seconds);
 // the close label does not parse, the duration is negative, or the result is
 // outside the year range 0000..9999.
 //
-// Wire it into charger.cdr.v1 by replacing the literal placeholder:
-//   const auto start = derive_start_utc(s.closed_at_utc, r.duration_ms);
-//   o << ",\"derived_start_utc\":" << (start ? "\"" + *start + "\"" : "null")
-//     << ",\"start_derivation\":\"close-minus-duration\"";
+// json_cdr() already wires this in as the fallback: sessions closed by a
+// v2.0-or-later writer carry a measured ocpi_start_utc ("start_source":
+// "journal"); older ones get this derivation, labelled "close-minus-duration",
+// so a dispute reviewer always knows how the start was established.
 std::optional<std::string> derive_start_utc(const std::string& closed_at_utc, std::int64_t duration_ms);
 
 }  // namespace charger

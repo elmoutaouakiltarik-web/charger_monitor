@@ -1,4 +1,4 @@
-# Charger Monitor — C++17 CLI and core library (v1.4.0)
+# Charger Monitor — C++17 CLI and core library (v2.0.0)
 
 Bay monitor for industrial DC chargers. It listens on the bus and never
 commands the power stage.

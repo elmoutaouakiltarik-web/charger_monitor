@@ -7,9 +7,9 @@
     "timestamp": "2026-10-18T00:00:00Z",
     "component": {
       "type": "library",
-      "bom-ref": "charger_monitor@1.4.0",
+      "bom-ref": "charger_monitor@2.0.0",
       "name": "charger_monitor",
-      "version": "1.4.0",
+      "version": "2.0.0",
       "description": "Deterministic monitoring library and tools for industrial DC charger bays",
       "licenses": [
         {
@@ -43,7 +43,7 @@
   "components": [],
   "dependencies": [
     {
-      "ref": "charger_monitor@1.4.0",
+      "ref": "charger_monitor@2.0.0",
       "dependsOn": []
     }
   ]

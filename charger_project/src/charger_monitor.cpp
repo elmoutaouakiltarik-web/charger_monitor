@@ -1146,15 +1146,37 @@ std::string ChainedAnchor::compute_sha256(const ChainedAnchor& anchor) {
     return sha256_hex(data);
 }
 
+std::string ChainedAnchor::sign_hmac(const ChainedAnchor& anchor, const std::string& secret) {
+    // The signed data is everything the anchor asserts, minus the signature
+    // itself, with a separator that cannot appear inside a hash field.
+    return WebhookEvent::compute_signature(
+        anchor.schema + "|" + anchor.timestamp_utc + "|" + anchor.journal_sha256 + "|" + anchor.prev_anchor_sha256,
+        secret);
+}
+
 [[maybe_unused]] std::string json_chained_anchor(const ChainedAnchor& anchor) { return anchor.to_json(); }
 
 [[maybe_unused]] std::optional<ChainedAnchor> parse_chained_anchor(const std::string& json) {
     return ChainedAnchor::from_json(json);
 }
 
-[[maybe_unused]] bool verify_chained_anchor(const ChainedAnchor& current, const std::string& prev_anchor_sha256) {
+bool verify_chained_anchor(const ChainedAnchor& current, const std::string& prev_anchor_sha256,
+                           const std::string& journal_sha256_expected, const std::string& hmac_secret) {
+    // 1. Chain: this anchor must name the anchor that came before it.
     if (current.prev_anchor_sha256 != prev_anchor_sha256) return false;
-    // In production: verify signature (RFC3161 token or HMAC)
+    // 2. Journal binding: the journal the anchor claims to cover must be the
+    //    journal as it exists now. A rewritten or replaced journal fails here.
+    if (current.journal_sha256 != journal_sha256_expected) return false;
+    // 3. Self-consistency: a well-formed anchor of this schema.
+    if (current.schema != CHAINED_ANCHOR_SCHEMA || current.timestamp_utc.empty() || current.journal_sha256.empty()) {
+        return false;
+    }
+    // 4. Signature, when a local secret is provided. Anchors signed by an
+    //    external timestamping authority are verified by the TSA client, not
+    //    here — the caller leaves the secret empty in that deployment.
+    if (!hmac_secret.empty()) {
+        return current.signature == ChainedAnchor::sign_hmac(current, hmac_secret);
+    }
     return true;
 }
 
@@ -1206,7 +1228,28 @@ std::string WebhookEvent::compute_signature(const std::string& payload, const st
 
 std::string json_webhook_event(const WebhookEvent& event) { return event.to_json(); }
 
-[[maybe_unused]] bool send_webhook(const std::string& url, const WebhookEvent& event, const std::string& /*secret*/,
+bool verify_webhook_event(const WebhookEvent& event, const std::string& secret) {
+    // Receiver-side check: the signature must be the sha256= HMAC over the
+    // same canonical string the sender used. An event sent without a secret
+    // carries no signature, and verifying it against a secret always fails.
+    if (secret.empty() || event.signature.empty()) return false;
+    std::string expected =
+        "sha256=" +
+        WebhookEvent::compute_signature(
+            event.event_type + "|" + event.asset_id + "|" + event.timestamp_utc + "|" + event.payload_json, secret);
+    // Constant-time compare: a receiver runs on a network, and although the
+    // payload is not a secret, early-exit compares are free to avoid here.
+    const auto& a = expected;
+    const auto& b = event.signature;
+    if (a.size() != b.size()) return false;
+    unsigned char diff = 0;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        diff |= static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]);
+    }
+    return diff == 0;
+}
+
+[[maybe_unused]] bool send_webhook(const std::string& url, const WebhookEvent& event, const std::string& secret,
                                    std::string& error) {
     // Parse URL: http://host:port/path  (https not supported in this zero-dep build)
     std::string scheme, host, path;
@@ -1230,22 +1273,58 @@ std::string json_webhook_event(const WebhookEvent& event) { return event.to_json
 
     auto port_start = rest.find(':');
     if (port_start != std::string::npos) {
-        port = static_cast<std::uint16_t>(std::stoi(rest.substr(port_start + 1)));
+        const std::string port_text = rest.substr(port_start + 1);
         rest = rest.substr(0, port_start);
+        // Manual parse: std::stoi throws on garbage, and a malformed webhook
+        // URL must never take the monitor down from its ingest loop.
+        unsigned long parsed_port = 0;
+        bool port_ok = !port_text.empty();
+        for (const char c : port_text) {
+            if (c < '0' || c > '9') {
+                port_ok = false;
+                break;
+            }
+            parsed_port = parsed_port * 10 + static_cast<unsigned long>(c - '0');
+            if (parsed_port > 65535) {
+                port_ok = false;
+                break;
+            }
+        }
+        if (!port_ok || parsed_port == 0) {
+            error = "Invalid URL: bad port";
+            return false;
+        }
+        port = static_cast<std::uint16_t>(parsed_port);
     }
     host = rest;
+
+    if (host.empty()) {
+        error = "Invalid URL: empty host";
+        return false;
+    }
 
     if (scheme != "http") {
         error = "Only http:// scheme is supported (no TLS in zero-dependency build)";
         return false;
     }
 
-    // Build HTTP request
-    std::string payload = event.to_json();
+    // Build HTTP request. When a secret is configured the event is signed
+    // with HMAC-SHA256 over a canonical string (event_type|asset_id|timestamp|
+    // payload), sent in an X-Signature header the way GitHub-style webhooks
+    // are, so a receiver verifies without parsing the body.
+    WebhookEvent signed_event = event;
+    if (!secret.empty()) {
+        signed_event.signature =
+            "sha256=" +
+            WebhookEvent::compute_signature(
+                event.event_type + "|" + event.asset_id + "|" + event.timestamp_utc + "|" + event.payload_json, secret);
+    }
+    std::string payload = signed_event.to_json();
     std::ostringstream req;
     req << "POST " << path << " HTTP/1.1\r\n";
     req << "Host: " << host << "\r\n";
     req << "Content-Type: application/json\r\n";
+    if (!signed_event.signature.empty()) req << "X-Signature: " << signed_event.signature << "\r\n";
     req << "Content-Length: " << payload.size() << "\r\n";
     req << "Connection: close\r\n";
     req << "\r\n";
@@ -1379,89 +1458,81 @@ std::string json_webhook_event(const WebhookEvent& event) { return event.to_json
 
 std::vector<AnomalyResult> detect_anomalies(const std::vector<SessionRecord>& sessions, const std::string& asset_id) {
     std::vector<AnomalyResult> anomalies;
-    if (sessions.size() < 10) return anomalies;  // Need enough data for statistics
 
-    // Build time-ordered arrays
+    // Time-ordered arrays, closed billable sessions only: an INTERRUPTED close
+    // is held for review, its numbers are not evidence.
     std::vector<double> energies;
     std::vector<double> durations;
     std::vector<double> costs;
     std::vector<std::string> timestamps;
-
     for (const auto& s : sessions) {
         if (!s.closed || !s.billing_complete) continue;
-        energies.push_back(static_cast<double>(s.energy_wh) / 1000.0);  // kWh
-        durations.push_back(static_cast<double>(s.duration_ms) / 60000.0);  // minutes
-        costs.push_back(static_cast<double>(s.total_cost_micro_eur) / 1000000.0);  // EUR
+        energies.push_back(static_cast<double>(s.energy_wh) / 1000.0);       // kWh
+        durations.push_back(static_cast<double>(s.duration_ms) / 60000.0);   // minutes
+        costs.push_back(static_cast<double>(s.total_cost_micro_eur) / 1e6);  // EUR
         timestamps.push_back(s.ocpi_start_utc);
     }
 
-    if (energies.size() < 10) return anomalies;
+    // Leave-one-out on the newest session: the baseline is the HISTORY BEFORE
+    // it, never the value under test. Including the tested value in its own
+    // baseline masks exactly the outliers this detector exists to catch (a 4x
+    // spike inflates the mean and the spread it is judged against).
+    const std::size_t n = energies.size();
+    if (n < 11) return anomalies;  // need a history of at least 10 plus the session under test
 
-    // Compute means and standard deviations
-    auto mean = [](const std::vector<double>& v) {
+    const std::size_t hist = n - 1;
+    auto mean_of = [hist](const std::vector<double>& v) {
         double sum = 0.0;
-        for (double x : v) sum += x;
-        return sum / v.size();
+        for (std::size_t i = 0; i < hist; ++i) sum += v[i];
+        return sum / static_cast<double>(hist);
     };
-
-    auto stddev = [&](const std::vector<double>& v) {
-        double m = mean(v);
+    // Sample standard deviation (n-1 denominator): the baseline is a sample,
+    // not the whole population, and n-1 keeps small histories conservative.
+    auto stddev_of = [hist, &mean_of](const std::vector<double>& v) {
+        const double m = mean_of(v);
         double sq = 0.0;
-        for (double x : v) sq += (x - m) * (x - m);
-        return std::sqrt(sq / v.size());
+        for (std::size_t i = 0; i < hist; ++i) sq += (v[i] - m) * (v[i] - m);
+        return std::sqrt(sq / static_cast<double>(hist - 1));
     };
 
-    const double e_mean = mean(energies);
-    const double e_std = stddev(energies);
-    const double d_mean = mean(durations);
-    const double d_std = stddev(durations);
-    const double c_mean = mean(costs);
-    const double c_std = stddev(costs);
+    const double e_mean = mean_of(energies);
+    const double e_std = stddev_of(energies);
+    const double d_mean = mean_of(durations);
+    const double d_std = stddev_of(durations);
+    const double c_mean = mean_of(costs);
+    const double c_std = stddev_of(costs);
 
-    // Check the most recent closed session (z-score > 3.0)
+    // The session under test is the most recent one.
     const double e_val = energies.back();
     const double d_val = durations.back();
     const double c_val = costs.back();
     const std::string ts = timestamps.back();
 
-    if (e_std > 0 && std::abs(e_val - e_mean) / e_std > 3.0) {
-        AnomalyResult a;
-        a.asset_id = asset_id;
-        a.anomaly_type = "energy_spike";
-        a.severity = "high";
-        a.timestamp_utc = ts;
-        a.expected_value = e_mean;
-        a.actual_value = e_val;
-        a.deviation_pct = ((e_val - e_mean) / e_mean) * 100.0;
-        a.description = "Energy consumption " + std::to_string(std::abs(a.deviation_pct)) + "% from mean";
-        anomalies.push_back(a);
-    }
+    // A constant baseline has zero spread: any deviation is then infinitely
+    // many sigmas away and IS an anomaly, not a silent pass. The severity
+    // gradient follows the same z>3 gate as the general case.
+    auto z_or_inf = [](double std, double val, double mean) {
+        if (std > 0.0) return std::abs(val - mean) / std;
+        return val != mean ? std::numeric_limits<double>::infinity() : 0.0;
+    };
 
-    if (d_std > 0 && std::abs(d_val - d_mean) / d_std > 3.0) {
+    auto push = [&](const char* type, const char* severity, double expected, double actual, const char* label) {
         AnomalyResult a;
         a.asset_id = asset_id;
-        a.anomaly_type = "duration_outlier";
-        a.severity = "medium";
+        a.anomaly_type = type;
+        a.severity = severity;
         a.timestamp_utc = ts;
-        a.expected_value = d_mean;
-        a.actual_value = d_val;
-        a.deviation_pct = ((d_val - d_mean) / d_mean) * 100.0;
-        a.description = "Session duration " + std::to_string(std::abs(a.deviation_pct)) + "% from mean";
+        a.expected_value = expected;
+        a.actual_value = actual;
+        a.deviation_pct = expected > 0.0 ? ((actual - expected) / expected) * 100.0 : 0.0;
+        a.description = std::string(label) + " " + std::to_string(std::abs(a.deviation_pct)) + "% from the " +
+                        std::to_string(hist) + "-session baseline";
         anomalies.push_back(a);
-    }
+    };
 
-    if (c_std > 0 && std::abs(c_val - c_mean) / c_std > 3.0) {
-        AnomalyResult a;
-        a.asset_id = asset_id;
-        a.anomaly_type = "cost_anomaly";
-        a.severity = "high";
-        a.timestamp_utc = ts;
-        a.expected_value = c_mean;
-        a.actual_value = c_val;
-        a.deviation_pct = ((c_val - c_mean) / c_mean) * 100.0;
-        a.description = "Session cost " + std::to_string(std::abs(a.deviation_pct)) + "% from mean";
-        anomalies.push_back(a);
-    }
+    if (z_or_inf(e_std, e_val, e_mean) > 3.0) push("energy_spike", "high", e_mean, e_val, "Energy consumption");
+    if (z_or_inf(d_std, d_val, d_mean) > 3.0) push("duration_outlier", "medium", d_mean, d_val, "Session duration");
+    if (z_or_inf(c_std, c_val, c_mean) > 3.0) push("cost_anomaly", "high", c_mean, c_val, "Session cost");
 
     return anomalies;
 }
@@ -1497,10 +1568,13 @@ FleetSummary compute_fleet_summary(const std::vector<Snapshot>& bay_snapshots) {
 
         if (snap.session.has_value() && !snap.session->closed) ++summary.active_sessions;
 
-        summary.total_energy_wh += snap.kpi.energy_closed_uwh / 1000ULL;
+        summary.total_energy_wh += snap.kpi.energy_closed_uwh / 1000000ULL;  // uWh -> Wh
 
-        // Revenue: closed billable sessions only, from last_session (open session is not yet priced final)
-        if (snap.last_session.has_value()) summary.total_revenue_micro_eur += snap.last_session->total_cost_micro_eur;
+        // Revenue: closed, billable sessions only. An INTERRUPTED close is
+        // held for review and never invoiced, so counting its cost here would
+        // inflate the fleet revenue.
+        if (snap.last_session.has_value() && snap.last_session->billing_complete)
+            summary.total_revenue_micro_eur += snap.last_session->total_cost_micro_eur;
 
         if (snap.kpi.availability_ppm >= 0) {
             availability_sum += static_cast<std::uint64_t>(snap.kpi.availability_ppm);
@@ -1512,12 +1586,12 @@ FleetSummary compute_fleet_summary(const std::vector<Snapshot>& bay_snapshots) {
         }
     }
 
-    summary.avg_availability_pct = availability_count > 0
-                                       ? static_cast<double>(availability_sum) / static_cast<double>(availability_count) / 10000.0
-                                       : 0.0;
-    summary.avg_utilization_pct = utilization_count > 0
-                                      ? static_cast<double>(utilization_sum) / static_cast<double>(utilization_count) / 10000.0
-                                      : 0.0;
+    summary.avg_availability_pct = availability_count > 0 ? static_cast<double>(availability_sum) /
+                                                                static_cast<double>(availability_count) / 10000.0
+                                                          : 0.0;
+    summary.avg_utilization_pct =
+        utilization_count > 0 ? static_cast<double>(utilization_sum) / static_cast<double>(utilization_count) / 10000.0
+                              : 0.0;
     return summary;
 }
 
@@ -1536,6 +1610,51 @@ std::string json_fleet_summary(const charger::FleetSummary& summary) {
     o << ",\"avg_utilization_pct\":" << std::fixed << std::setprecision(2) << summary.avg_utilization_pct;
     o << "}";
     return o.str();
+}
+
+SessionTrend compute_session_trend(const std::vector<SessionRecord>& sessions, const std::string& asset_id) {
+    SessionTrend trend;
+    trend.asset_id = asset_id;
+    trend.energy_wh.reserve(sessions.size());
+    trend.duration_s.reserve(sessions.size());
+    trend.peak_power_kw.reserve(sessions.size());
+    trend.avg_power_kw.reserve(sessions.size());
+    trend.efficiency_pct.reserve(sessions.size());
+    trend.cost_eur.reserve(sessions.size());
+
+    for (const auto& s : sessions) {
+        // Each point is stamped with the session's own recorded start time, not
+        // with the wall clock of the analysis run: the trend must mean the same
+        // thing when it is computed tomorrow from the same journal. The close
+        // timestamp is the fallback for journals written before v2.0, whose
+        // open-side stamp was not journaled.
+        const std::string ts = !s.ocpi_start_utc.empty() ? s.ocpi_start_utc : s.ocpi_stop_utc;
+
+        // Energy delivered, in Wh exactly as billed (1 Wh = 1e6 uWh).
+        trend.energy_wh.push_back({ts, static_cast<double>(s.energy_uwh) / 1e6});
+
+        // Wall duration in seconds.
+        trend.duration_s.push_back({ts, static_cast<double>(s.duration_ms) / 1000.0});
+
+        // Peak power, mW -> kW.
+        trend.peak_power_kw.push_back({ts, static_cast<double>(s.peak_power_mw) / 1e6});
+
+        // Mean power over the wall duration, from the exact energy total.
+        // Wh/s -> kW: 1 Wh per second is 3.6 kW, hence the 3.6 factor.
+        const double duration_s = static_cast<double>(s.duration_ms) / 1000.0;
+        const double energy_wh = static_cast<double>(s.energy_uwh) / 1e6;
+        trend.avg_power_kw.push_back({ts, duration_s > 0.0 ? energy_wh / duration_s * 3.6 : 0.0});
+
+        // Duty factor: fraction of the session that was actually charging.
+        // Measured, not modeled: charging_s and duration_ms both come from
+        // accepted samples. Sessions with zero wall duration are skipped.
+        trend.efficiency_pct.push_back(
+            {ts, duration_s > 0.0 ? static_cast<double>(s.charging_s) / duration_s * 100.0 : 0.0});
+
+        // Cost in EUR from the exact integer micro-EUR total.
+        trend.cost_eur.push_back({ts, static_cast<double>(s.total_cost_micro_eur) / 1e6});
+    }
+    return trend;
 }
 
 std::string json_session_trend(const charger::SessionTrend& trend) {
@@ -1617,7 +1736,7 @@ std::string json_ocpi_cdr(const charger::OcpiCdrRecord& cdr) {
 }
 
 std::vector<OcpiCdrRecord> generate_ocpi_cdrs(const std::vector<charger::SessionRecord>& sessions,
-                                               const charger::Config& config) {
+                                              const charger::Config& config) {
     std::vector<OcpiCdrRecord> cdrs;
 
     for (const auto& s : sessions) {
@@ -1804,16 +1923,28 @@ SessionTrend MultiBayMonitor::bay_trend(const std::string& asset_id) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = bays_.find(asset_id);
     if (it == bays_.end()) return SessionTrend{};
-    // Would need access to session history - simplified
-    return SessionTrend{};
+    return compute_session_trend(it->second.closed_history, asset_id);
 }
 
 std::vector<AnomalyResult> MultiBayMonitor::bay_anomalies(const std::string& asset_id) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = bays_.find(asset_id);
     if (it == bays_.end()) return {};
-    // Would need access to session history - simplified
-    return {};
+    return detect_anomalies(it->second.closed_history, asset_id);
+}
+
+void MultiBayMonitor::record_closed_session(const std::string& asset_id, const SessionRecord& record) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = bays_.find(asset_id);
+    if (it == bays_.end()) return;
+    auto& history = it->second.closed_history;
+    history.push_back(record);
+    // Bounded memory: analytics need a recent window, not the whole archive.
+    // The journal remains the durable record; this is only the working copy.
+    constexpr std::size_t kMaxHistoryPerBay = 256;
+    if (history.size() > kMaxHistoryPerBay) {
+        history.erase(history.begin(), history.begin() + (history.size() - kMaxHistoryPerBay));
+    }
 }
 
 void MultiBayMonitor::set_webhook(const std::string& url, const std::string& secret) {

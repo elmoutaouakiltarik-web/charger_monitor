@@ -4,7 +4,7 @@ title: "charger_monitor: an arithmetically exact, tamper-evident session ledger 
 type: software
 license: Apache-2.0
 repository-code: "https://github.com/elmoutaouakiltarik-web/charger_monitor"
-version: "1.4.0"
+version: "2.0.0"
 authors:
   - family-names: "El Moutaouakil"
     given-names: "Tarek"

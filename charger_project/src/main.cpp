@@ -14,6 +14,7 @@
 #include <ctime>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -115,6 +116,13 @@ struct Options {
     bool verify_anchor{false};
     std::string anchor_file;
     bool print_config{false};
+    // v2 analytics and fleet tooling
+    std::string multibay_file;
+    std::string profile_file;
+    bool print_multibay_example{false};
+    bool print_profile_example{false};
+    bool trend{false};
+    bool anomalies{false};
     std::optional<std::string> stuck_at_s;
     std::optional<std::string> max_v_rate;
     std::optional<std::string> max_i_rate;
@@ -156,6 +164,16 @@ void usage(const char* argv0) {
         << "  --verify-anchor --journal PATH --anchor-file PATH    prove the anchored prefix was not rewritten\n"
         << "  --portfolio PATH       site rollup across assets, rebuilt from a journal\n"
         << "  --replay-interval-ms N in --replay, advance time by N ms per line (default 0)\n"
+        << "\nFleet and analytics (v2)\n"
+        << "  --validate-multibay PATH   validate a multi-bay config document (charger.multibay.config.v1);\n"
+        << "                             exit 3 with located errors; '-' reads stdin\n"
+        << "  --validate-profile PATH    validate a power-module profile JSON; '-' reads stdin\n"
+        << "  --print-multibay-example   print a multi-bay config example\n"
+        << "  --print-profile-example    print a power-module profile example\n"
+        << "  --trend --journal PATH [--asset-id ID]   session trend series (energy, duration, power,\n"
+        << "                             duty factor, cost) from a verified journal\n"
+        << "  --anomalies --journal PATH [--asset-id ID]  statistical outliers over closed sessions\n"
+        << "                             (energy spike, duration outlier, cost anomaly, pattern break)\n"
         << "\nSupervision files (read-only exports; the monitor opens no listening socket)\n"
         << "  --snapshot-file PATH   atomically rewrite PATH with the newest snapshot (same JSON line as stdout)\n"
         << "  --metrics-file PATH    atomically rewrite PATH with Prometheus text, e.g. for the node_exporter\n"
@@ -391,6 +409,24 @@ std::optional<Options> parse_args(int argc, char** argv, std::string& error) {
             }
         } else if (a == "--print-tou") {
             opt.print_tou = true;
+        } else if (a == "--validate-multibay") {
+            if (!take_value(i, argc, argv, opt.multibay_file) || opt.multibay_file.empty()) {
+                error = "--validate-multibay requires a PATH";
+                return std::nullopt;
+            }
+        } else if (a == "--validate-profile") {
+            if (!take_value(i, argc, argv, opt.profile_file) || opt.profile_file.empty()) {
+                error = "--validate-profile requires a PATH";
+                return std::nullopt;
+            }
+        } else if (a == "--print-multibay-example") {
+            opt.print_multibay_example = true;
+        } else if (a == "--print-profile-example") {
+            opt.print_profile_example = true;
+        } else if (a == "--trend") {
+            opt.trend = true;
+        } else if (a == "--anomalies") {
+            opt.anomalies = true;
         } else if (a == "--print-config") {
             opt.print_config = true;
         } else if (a == "--stuck-at-s") {
@@ -437,7 +473,9 @@ std::optional<Options> parse_args(int argc, char** argv, std::string& error) {
         }
     }
     const bool is_action = !opt.portfolio_from.empty() || opt.verify_journal || opt.print_config || opt.dump_dbc ||
-                           opt.anchor_journal || opt.verify_anchor || opt.print_tou;
+                           opt.anchor_journal || opt.verify_anchor || opt.print_tou || !opt.multibay_file.empty() ||
+                           !opt.profile_file.empty() || opt.print_multibay_example || opt.print_profile_example ||
+                           opt.trend || opt.anomalies;
     const bool exports = !opt.snapshot_file.empty() || !opt.metrics_file.empty();
     if (is_action && exports) {
         error = "--snapshot-file and --metrics-file belong to a listening mode, not to a standalone action";
@@ -628,6 +666,10 @@ class SessionLog {
             const auto before = ledger_.lines_written();
             const bool written = ledger_.append_session_open(*snap.session, snap.asset_id, stamp);
             warn_if_not_written(written, before, "session open", snap.asset_id, snap.session->id);
+            // The open stamp is journaled with the close line as the OCPI
+            // start time, so a settled session carries its own interval even
+            // when the journal was written days before the analysis run.
+            open_stamps_[snap.asset_id + "#" + std::to_string(snap.session->id)] = stamp;
         }
         if (!closed) return;
         // The tariff of record travels with the session so a dispute can be
@@ -635,10 +677,19 @@ class SessionLog {
         const std::string tariff = charger::json_tariff_block(monitor.config().tariff);
         bool close_recorded = true;
         if (journal_enabled_ && snap.last_session) {
+            // Work on a copy: the OCPI interval fields are enriched per close
+            // here, while the monitor's own record stays untouched.
+            charger::SessionRecord closed_rec = *snap.last_session;
+            const std::string key = snap.asset_id + "#" + std::to_string(closed_rec.id);
+            const auto open_it = open_stamps_.find(key);
+            if (open_it != open_stamps_.end()) {
+                closed_rec.ocpi_start_utc = open_it->second;
+                open_stamps_.erase(open_it);
+            }
+            closed_rec.ocpi_stop_utc = stamp;
             const auto before = ledger_.lines_written();
-            close_recorded =
-                ledger_.append_session_close(*snap.last_session, snap.asset_id, snap.currency, stamp, tariff);
-            warn_if_not_written(close_recorded, before, "session close", snap.asset_id, snap.last_session->id);
+            close_recorded = ledger_.append_session_close(closed_rec, snap.asset_id, snap.currency, stamp, tariff);
+            warn_if_not_written(close_recorded, before, "session close", snap.asset_id, closed_rec.id);
         }
         if (jsonl_enabled_ && snap.last_session) {
             // A close line that never reached the journal must not reach the
@@ -667,6 +718,9 @@ class SessionLog {
 
     std::ofstream out_;
     bool jsonl_enabled_{false};
+    // asset#id -> UTC stamp of the session_open line, kept only for sessions
+    // currently open; erased on close so a reused id cannot inherit a stale one.
+    std::map<std::string, std::string> open_stamps_;
     charger::Ledger ledger_;
     bool journal_enabled_{false};
 };
@@ -1136,6 +1190,107 @@ int run_verify_journal(const std::string& path) {
     return 0;
 }
 
+// Reads a whole file into a string. "-" means stdin, so examples and
+// validations can be piped: charger_monitor --validate-multibay - < site.json
+static std::optional<std::string> read_whole_file(const std::string& path, std::string& error) {
+    std::istream* in = &std::cin;
+    std::ifstream file;
+    if (path != "-") {
+        file.open(path, std::ios::binary);
+        if (!file) {
+            error = "cannot open " + path;
+            return std::nullopt;
+        }
+        in = &file;
+    }
+    std::ostringstream buf;
+    buf << in->rdbuf();
+    return buf.str();
+}
+
+int run_validate_multibay(const std::string& path) {
+    std::string err;
+    const auto text = read_whole_file(path, err);
+    if (!text) {
+        std::cerr << "FATAL: " << err << '\n';
+        return 2;
+    }
+    const auto res = charger::parse_multibay_config(*text);
+    if (!res.ok) {
+        std::cerr << "MULTIBAY CONFIG INVALID: " << res.errors.size() << " error(s)\n";
+        for (const auto& e : res.errors) {
+            std::cerr << "  " << e.field << ": " << e.message << '\n';
+        }
+        return 3;
+    }
+    std::cout << "MULTIBAY CONFIG OK: " << res.config->bays.size() << " bay(s)";
+    std::size_t enabled = 0;
+    for (const auto& b : res.config->bays) {
+        if (b.enabled) ++enabled;
+        std::cout << "\n  " << b.config.asset_id << " (" << (b.enabled ? "enabled" : "disabled") << ", priority "
+                  << b.priority << ")";
+    }
+    std::cout << "\n"
+              << enabled << " enabled, webhook " << (res.config->webhook_url.empty() ? "none" : res.config->webhook_url)
+              << "\n";
+    return 0;
+}
+
+int run_validate_profile(const std::string& path) {
+    std::string err;
+    const auto text = read_whole_file(path, err);
+    if (!text) {
+        std::cerr << "FATAL: " << err << '\n';
+        return 2;
+    }
+    const auto res = charger::parse_power_module_profile(*text);
+    if (!res.ok) {
+        std::cerr << "PROFILE INVALID: " << res.errors.size() << " error(s)\n";
+        for (const auto& e : res.errors) {
+            std::cerr << "  " << e.field << ": " << e.message << '\n';
+        }
+        return 3;
+    }
+    std::cout << "PROFILE OK: " << res.profile->name << " (" << res.profile->vendor << " " << res.profile->model
+              << ")\n  thresholds: temp<=" << res.profile->max_temp_c << "C, fan>=" << res.profile->min_fan_rpm
+              << "rpm, dc-link " << res.profile->min_dc_link_v << "-" << res.profile->max_dc_link_v
+              << "V\n  signals: temp=" << res.profile->temp_signal << " fan=" << res.profile->fan_speed_signal << "\n";
+    return 0;
+}
+
+// Common loading for --trend and --anomalies: verified journal in, closed
+// sessions out, optionally narrowed to one asset.
+static int run_sessions_action(const std::string& journal, const std::string& asset_id, bool trend) {
+    std::string err;
+    auto led = charger::Ledger::open(journal, false, err);
+    if (!led) {
+        std::cerr << "FATAL: " << err << '\n';
+        return 1;
+    }
+    if (!led->verify(err)) {
+        std::cerr << "LEDGER TAMPERED: " << err << '\n';
+        return 3;
+    }
+    // recover() replays the journal and fills sessions(); without it the
+    // ledger only knows its hash chain, not its content.
+    (void)led->recover();
+    std::vector<charger::SessionRecord> sessions;
+    for (const auto& s : led->sessions()) {
+        if (asset_id.empty() || s.asset_id == asset_id) sessions.push_back(s.record);
+    }
+    if (sessions.empty()) {
+        std::cerr << "NO CLOSED SESSIONS" << (asset_id.empty() ? "" : " for asset " + asset_id) << '\n';
+        return 4;
+    }
+    if (trend) {
+        std::cout << charger::json_session_trend(charger::compute_session_trend(sessions, asset_id)) << '\n';
+    } else {
+        const auto anomalies = charger::detect_anomalies(sessions, asset_id);
+        std::cout << charger::json_anomalies(anomalies) << '\n';
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
@@ -1160,6 +1315,27 @@ int main(int argc, char** argv) {
     if (parsed->print_tou) {
         std::cout << charger::json_tou_example();
         return 0;
+    }
+    if (parsed->print_multibay_example) {
+        std::cout << charger::json_multibay_config_example();
+        return 0;
+    }
+    if (parsed->print_profile_example) {
+        std::cout << charger::json_power_module_profile_example();
+        return 0;
+    }
+    if (!parsed->multibay_file.empty()) {
+        return run_validate_multibay(parsed->multibay_file);
+    }
+    if (!parsed->profile_file.empty()) {
+        return run_validate_profile(parsed->profile_file);
+    }
+    if (parsed->trend || parsed->anomalies) {
+        if (parsed->journal.empty()) {
+            std::cerr << "FATAL: --trend/--anomalies require --journal PATH (and optionally --asset-id)\n";
+            return 2;
+        }
+        return run_sessions_action(parsed->journal, parsed->asset_id, parsed->trend);
     }
     if (parsed->dump_dbc) {
         if (parsed->dbc_file.empty()) {

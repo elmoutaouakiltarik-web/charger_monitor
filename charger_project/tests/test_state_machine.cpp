@@ -1142,7 +1142,7 @@ int main() {
             // a stale copy there would still verify against the chain.
             {
                 std::ifstream f(journal, std::ios::binary);
-                const auto tariff_field = [](std::string l) {
+                const auto tariff_fields = [](const std::string& l) {
                     std::vector<std::string> fields;
                     std::size_t start = 0;
                     while (true) {
@@ -1154,15 +1154,27 @@ int main() {
                         fields.push_back(l.substr(start, tab - start));
                         start = tab + 1;
                     }
-                    return fields.size() >= 2 ? fields[fields.size() - 2] : std::string("<short>");
+                    // Since v2.0, close lines append electrical-envelope columns
+                    // after the JSON payload, so the tariff of record is located
+                    // by shape (a dedicated column that starts with the tariff
+                    // schema) rather than by counting fields from the end. The
+                    // tariff embedded inside the payload JSON never starts a
+                    // field, because the payload field starts with {"schema":
+                    // "charger.session...", so this matches the column only.
+                    std::vector<std::string> found;
+                    for (const auto& fl : fields) {
+                        if (fl.rfind("{\"schema\":\"charger.tariff", 0) == 0) found.push_back(fl);
+                    }
+                    return found;
                 };
                 std::string line;
                 std::getline(f, line);
-                require(tariff_field(line).empty(), "the first open line has no tariff of record");
+                require(tariff_fields(line).empty(), "the first open line has no tariff of record");
                 std::getline(f, line);
-                require(tariff_field(line).empty(), "the second open line does not inherit the tariff");
+                require(tariff_fields(line).empty(), "the second open line does not inherit the tariff");
                 std::getline(f, line);
-                require(tariff_field(line).find("charger.tariff.v1") != std::string::npos,
+                require(!tariff_fields(line).empty() &&
+                            tariff_fields(line).front().find("charger.tariff.v1") != std::string::npos,
                         "the close line carries the tariff of record");
             }
 
@@ -1182,7 +1194,11 @@ int main() {
                 "the tariff of record travels with the dispute");
             const auto cdr = json_cdr(s);
             require(cdr.find("\"schema\":\"charger.cdr.v1\"") != std::string::npos, "cdr schema");
-            require(cdr.find("\"derived_start_utc\"") != std::string::npos, "cdr start is labelled derived");
+            // A hand-built session has no journaled open stamp, so the CDR must
+            // label its start as derived (close minus duration), never claim a
+            // measurement it does not have.
+            require(cdr.find("\"start_source\":\"close-minus-duration\"") != std::string::npos,
+                    "cdr start is labelled derived");
             require(cdr.find("\"vat\":\"omitted\"") != std::string::npos, "cdr vat omitted, not zero-rated");
         }
         std::filesystem::remove(journal);
@@ -1368,7 +1384,13 @@ int main() {
             std::string verr;
             require(reopened->verify(verr), "the chain still verifies after a failed write: " + verr);
             const auto rep = reopened->recover();
-            require(rep.session_closes == 0, "the close that failed is not in the file");
+            // Only when the write actually failed is the close absent. Running
+            // as root (or on a filesystem that ignores the read-only bit) the
+            // write succeeds despite the permissions, and the assertions that
+            // describe the failure path would then be wrong to demand.
+            if (!wrote) {
+                require(rep.session_closes == 0, "the close that failed is not in the file");
+            }
 
             // And the next append still lands, proving the failure left no torn
             // line behind for it to build on.
@@ -1377,7 +1399,7 @@ int main() {
             std::string verr2;
             require(reopened->verify(verr2), "the chain verifies with the line written after the failure: " + verr2);
         }
-            fs::remove_all(dir);
+        fs::remove_all(dir);
     }
 
     // === Time-of-use (TOU) tests ===
@@ -1392,9 +1414,9 @@ int main() {
 
         // Split session across off-peak -> peak boundary
         charger::TimeSample s1{0, 0, 0};
-        charger::TimeSample s2{3 * 3600 * 1000, 3 * 4800000, 3 * 3600};   // 3h, 14400 uWh, 03:00
-        charger::TimeSample s3{6 * 3600 * 1000, 6 * 4800000, 6 * 3600};   // 6h, 28800 uWh, 06:00
-        charger::TimeSample s4{9 * 3600 * 1000, 9 * 4800000, 9 * 3600};   // 9h, 43200 uWh, 09:00 (peak)
+        charger::TimeSample s2{3 * 3600 * 1000, 3 * 4800000, 3 * 3600};  // 3h, 14400 uWh, 03:00
+        charger::TimeSample s3{6 * 3600 * 1000, 6 * 4800000, 6 * 3600};  // 6h, 28800 uWh, 06:00
+        charger::TimeSample s4{9 * 3600 * 1000, 9 * 4800000, 9 * 3600};  // 9h, 43200 uWh, 09:00 (peak)
 
         std::vector<charger::TimeSample> samples = {s1, s2, s3, s4};
         const auto r = charger::price_time_of_use(tou, samples, 0, 1, 1);
@@ -1433,8 +1455,7 @@ int main() {
         }
 
         const auto aj = a.to_json();
-        require(aj.find("\"schema\":\"charger.anchor.chained.v1\"") != std::string::npos,
-                "JSON contains schema");
+        require(aj.find("\"schema\":\"charger.anchor.chained.v1\"") != std::string::npos, "JSON contains schema");
         require(aj.find("\"journal_sha256\":\"" + a.journal_sha256 + "\"") != std::string::npos,
                 "JSON contains journal hash");
 
@@ -1442,8 +1463,21 @@ int main() {
         require(parsed.has_value(), "parsed anchor matches original");
         require(parsed->journal_sha256 == a.journal_sha256, "journal hash round-trips");
 
-        require(charger::verify_chained_anchor(*parsed, ""), "genesis anchor verifies");
-        require(!charger::verify_chained_anchor(*parsed, "wrong"), "wrong prev hash fails");
+        require(charger::verify_chained_anchor(*parsed, "", a.journal_sha256), "genesis anchor verifies");
+        require(!charger::verify_chained_anchor(*parsed, "wrong", a.journal_sha256), "wrong prev hash fails");
+        require(!charger::verify_chained_anchor(*parsed, "", "differentjournal"), "journal mismatch fails");
+
+        // Anchor HMAC signature: sign with the site secret, verify locally.
+        charger::ChainedAnchor signed_anchor = a;
+        signed_anchor.signature = charger::ChainedAnchor::sign_hmac(signed_anchor, "site-secret");
+        require(charger::verify_chained_anchor(signed_anchor, "", a.journal_sha256, "site-secret"),
+                "HMAC-signed anchor verifies");
+        require(!charger::verify_chained_anchor(signed_anchor, "", a.journal_sha256, "other-secret"),
+                "wrong anchor secret fails");
+        charger::ChainedAnchor tampered = signed_anchor;
+        tampered.journal_sha256 = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        require(!charger::verify_chained_anchor(tampered, "", a.journal_sha256, "site-secret"),
+                "tampered journal hash fails the signature");
     }
 
     // === Webhook HMAC-SHA256 test ===

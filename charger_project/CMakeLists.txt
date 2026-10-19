@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(charger_monitor_demo VERSION 1.4.0 LANGUAGES CXX)
+project(charger_monitor_demo VERSION 2.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -90,7 +90,7 @@ if(CHARGER_BUILD_TESTS)
     add_test(NAME charger_candump COMMAND charger_candump_tests
              ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/bay_session.candump)
 
-    foreach(suite reconcile ocpp)
+    foreach(suite reconcile ocpp v2)
         add_executable(charger_${suite}_tests tests/test_${suite}.cpp)
         target_link_libraries(charger_${suite}_tests PRIVATE charger_core)
         target_compile_options(charger_${suite}_tests PRIVATE -Wall -Wextra -Wpedantic ${SANFLAGS})

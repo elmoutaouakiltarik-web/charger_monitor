@@ -729,8 +729,7 @@ MultiBayConfigLoadResult parse_multibay_config(const std::string& text) {
             } else {
                 saw_schema = true;
                 if (*v != MULTIBAY_CONFIG_SCHEMA) {
-                    res.errors.push_back(
-                        {"schema", "expected version " + std::string(MULTIBAY_CONFIG_SCHEMA)});
+                    res.errors.push_back({"schema", "expected version " + std::string(MULTIBAY_CONFIG_SCHEMA)});
                 }
             }
         } else if (*key == "global_report_interval_ms") {
@@ -984,8 +983,7 @@ PowerModuleProfileLoadResult parse_power_module_profile(const std::string& json_
                     }
                 }
                 if (!found) {
-                    res.errors.push_back(
-                        {m.field, "signal '" + m.signal + "' is not present in the embedded DBC"});
+                    res.errors.push_back({m.field, "signal '" + m.signal + "' is not present in the embedded DBC"});
                 }
             }
         }
@@ -993,5 +991,30 @@ PowerModuleProfileLoadResult parse_power_module_profile(const std::string& json_
     res.ok = res.errors.empty();
     if (!res.ok) res.profile = nullptr;
     return res;
+}
+
+// A minimal but complete example an integrator can copy and adapt. The signal
+// names are the demo profile's, not a vendor's: real deployments take them
+// from the manufacturer's DBC (see parse_config for the DBC adoption path).
+std::string json_power_module_profile_example() {
+    std::ostringstream o;
+    o << "{\n"
+      << "  \"name\": \"site-a-power-module\",\n"
+      << "  \"vendor\": \"<vendor from the DBC node name>\",\n"
+      << "  \"model\": \"<model from the service documentation>\",\n"
+      << "  \"temp_signal\": \"Module_Temperature\",\n"
+      << "  \"fan_speed_signal\": \"Fan_RPM\",\n"
+      << "  \"dc_link_voltage_signal\": \"DC_Link_Voltage\",\n"
+      << "  \"interlock_signal\": \"Interlock_Status\",\n"
+      << "  \"fault_code_signal\": \"Fault_Code\",\n"
+      << "  \"max_temp_c\": 80,\n"
+      << "  \"min_fan_rpm\": 1000,\n"
+      << "  \"min_dc_link_v\": 300,\n"
+      << "  \"max_dc_link_v\": 900\n"
+      << "}\n";
+    // No trailing commentary inside the document: what this function returns
+    // must parse. Signal names and thresholds are the demo defaults — real
+    // deployments take theirs from the vendor DBC and service documentation.
+    return o.str();
 }
 }  // namespace charger

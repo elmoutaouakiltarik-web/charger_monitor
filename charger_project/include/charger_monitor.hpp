@@ -19,7 +19,7 @@
 
 namespace charger {
 
-constexpr const char* VERSION = "1.4.0";
+constexpr const char* VERSION = "2.0.0";
 constexpr const char* PROJECT_NAME = "charger_monitor";
 constexpr const char* SNAPSHOT_SCHEMA = "charger.snapshot.v1";
 constexpr const char* SESSION_SCHEMA = "charger.session.v1";
@@ -293,11 +293,16 @@ struct ChainedAnchor {
     std::string timestamp_utc;
     std::string journal_sha256;
     std::string prev_anchor_sha256;  // empty for genesis anchor
-    std::string signature;           // RFC3161 token or HMAC
+    std::string signature;           // HMAC-SHA256 (see sign_hmac) or an external RFC3161 token
 
     std::string to_json() const;
     static std::optional<ChainedAnchor> from_json(const std::string& json);
     static std::string compute_sha256(const ChainedAnchor& anchor);
+
+    // HMAC-SHA256 over schema|timestamp_utc|journal_sha256|prev_anchor_sha256
+    // (the signature never covers itself). This is the signature that
+    // verify_chained_anchor can check locally, with the site secret.
+    static std::string sign_hmac(const ChainedAnchor& anchor, const std::string& secret);
 };
 
 // Webhook Event for real-time streaming
@@ -307,11 +312,20 @@ struct WebhookEvent {
     std::string asset_id;
     std::string timestamp_utc;  // RFC3339
     std::string payload_json;   // JSON payload specific to event_type
-    std::string signature;      // HMAC-SHA256 of payload with webhook_secret
+    std::string signature;      // "sha256=<hex>" HMAC over the canonical string
+                                // event_type|asset_id|timestamp_utc|payload_json
+                                // with the webhook secret; empty when unsigned.
 
     std::string to_json() const;
+    // HMAC-SHA256 (RFC 2104) of the message, keyed with the secret. Longer
+    // keys are hashed first, per the RFC.
     static std::string compute_signature(const std::string& payload, const std::string& secret);
 };
+
+// Receiver-side verification of a webhook event. Returns true only when the
+// event carries a signature that matches the HMAC of its canonical form under
+// this secret. Comparison is constant-time.
+bool verify_webhook_event(const WebhookEvent& event, const std::string& secret);
 
 // Multi-Bay Configuration
 struct BayConfig {
@@ -518,7 +532,18 @@ std::optional<CanFrame> parse_hex_frame(const std::string& line, Clock::time_poi
 // Chained Anchor implementation
 std::string json_chained_anchor(const ChainedAnchor& anchor);
 std::optional<ChainedAnchor> parse_chained_anchor(const std::string& json);
-bool verify_chained_anchor(const ChainedAnchor& current, const std::string& prev_anchor_sha256);
+// Full anchor verification. Four checks, in order:
+//   1. chain: the anchor points at the anchor that preceded it
+//      (empty prev_anchor_sha256 expected for the genesis anchor);
+//   2. journal binding: the journal hash the anchor claims matches the
+//      journal as read now — a rewritten journal fails here, which is the
+//      tamper signal the anchor exists to raise;
+//   3. self-consistency: schema and timestamp are present and valid;
+//   4. signature: when hmac_secret is non-empty, the HMAC must match
+//      sign_hmac(). Leave it empty for anchors signed by an external TSA
+//      (RFC3161): the token is then verified outside this library.
+bool verify_chained_anchor(const ChainedAnchor& current, const std::string& prev_anchor_sha256,
+                           const std::string& journal_sha256_expected, const std::string& hmac_secret = "");
 std::string compute_anchor_sha256(const ChainedAnchor& anchor);
 
 // Webhook implementation

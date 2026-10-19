@@ -67,6 +67,7 @@ struct PowerModuleProfileLoadResult {
     std::vector<ConfigError> errors;
 };
 PowerModuleProfileLoadResult parse_power_module_profile(const std::string& json_text);
+std::string json_power_module_profile_example();
 
 std::string json_config_example();
 
