@@ -580,6 +580,12 @@ class MultiBayMonitor {
     // Enable/disable a bay
     void set_bay_enabled(const std::string& asset_id, bool enabled);
 
+    // Feed the analytics history with a session the caller has closed and
+    // written to its journal. The monitor keeps a bounded copy (last 256 per
+    // bay) for bay_trend()/bay_anomalies(). Nothing is invented: without
+    // recorded sessions those analytics return empty, not fabricated data.
+    void record_closed_session(const std::string& asset_id, const SessionRecord& record);
+
     // Get list of bay asset IDs
     std::vector<std::string> bay_asset_ids() const;
 
@@ -604,6 +610,7 @@ class MultiBayMonitor {
         std::unique_ptr<Monitor> monitor;
         bool enabled{true};
         int priority{0};
+        std::vector<SessionRecord> closed_history;
     };
 
     MultiBayConfig config_;
